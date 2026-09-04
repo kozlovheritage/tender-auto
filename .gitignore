@@ -2,7 +2,8 @@
 secrets.txt
 sender_config.json
 comands.txt
-_.zakupki.gov.ru.crt
+*.crt
+*.pem
 
 # ── Данные и рантайм ────────────────────────────────────────────────
 data/
@@ -11,10 +12,11 @@ temp_files/
 
 # ── Выгрузки и дампы ────────────────────────────────────────────────
 выгрузка_*.xlsx
+итоги_*.xlsx
 *.html
 diag_*_out.txt
-dump_region.txt
-tc_precheck_dump.txt
+*_dump.txt
+Pasted_Text_*
 
 # ── Бэкапы ──────────────────────────────────────────────────────────
 *.bak
@@ -26,7 +28,16 @@ __pycache__/
 *.pyc
 .pytest_cache/
 
-# ── Одноразовые патчеры/диагностики (не часть продукта) ─────────────
+# ── Локальные конфиги ───────────────────────────────────────────────
+sampler_config.txt
+config/settings.toml
+
+# ── Внутренние документы (не для публикации) ────────────────────────
+Тендер_Авто_v1.0.md
+Пошаговая_инструкция.md
+УСТАНОВКА_И_ИЗМЕНЕНИЯ.txt
+
+# ── Одноразовые патчеры/диагностики ─────────────────────────────────
 fix_*.py
 patch_*.py
 repair_*.py
@@ -34,7 +45,4 @@ apply_*.py
 diag_*.py
 dump_*.py
 retry_failed.py
-check_patch_status.py������_���_v1.0.md
-sampler_config.txt
-
-Тендер_Авто_v1.0.md
+check_patch_status.py
