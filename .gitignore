@@ -46,3 +46,6 @@ diag_*.py
 dump_*.py
 retry_failed.py
 check_patch_status.py
+
+# ── Локальный выбор темы ────────────────────────────────────────────
+ui_theme.txt
