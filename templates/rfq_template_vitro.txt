@@ -1,0 +1,38 @@
+Subject: {rfq_subject}
+
+Dear Sales Team,
+
+My name is {sender_name}, Procurement Manager at VITRO LOGISTIC LLC.
+
+Tender reference: {tender_number}
+Tender subject: {tender_subject}
+Tender link: {tender_url}
+
+Please provide your quotation for the following requested items:
+
+{items_table}
+
+Please confirm:
+
+- Unit and total price;
+- Original manufacturer and exact part number;
+- Availability and lead time;
+- Country of origin and year of manufacture;
+- Payment and shipment terms, including EXW/FCA terms where applicable;
+- Warranty: {warranty_requirement};
+- Available quality documents, packing dimensions, gross weight and dispatch city.
+
+Please quote the exact part numbers. If a part number has been replaced by a newer OEM number, please indicate it. Equivalent products may be offered only as an additional option.
+
+Original products are preferred. Please clearly identify any equivalent or alternative products.
+
+Please send your quotation as soon as possible, preferably by {tender_deadline_en}.
+
+We place order in 2-3 weeks
+
+Payment terms: 100% advance payment.
+
+Best regards,
+Andrey Kozlov
+Tender Analyst
+VITRO LOGISTIC LLC

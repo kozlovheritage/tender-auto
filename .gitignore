@@ -1,0 +1,40 @@
+# ── Секреты / приватное ─────────────────────────────────────────────
+secrets.txt
+sender_config.json
+comands.txt
+_.zakupki.gov.ru.crt
+
+# ── Данные и рантайм ────────────────────────────────────────────────
+data/
+output/
+temp_files/
+
+# ── Выгрузки и дампы ────────────────────────────────────────────────
+выгрузка_*.xlsx
+*.html
+diag_*_out.txt
+dump_region.txt
+tc_precheck_dump.txt
+
+# ── Бэкапы ──────────────────────────────────────────────────────────
+*.bak
+*.bak_syntax
+*.broken_bak
+
+# ── Python ──────────────────────────────────────────────────────────
+__pycache__/
+*.pyc
+.pytest_cache/
+
+# ── Одноразовые патчеры/диагностики (не часть продукта) ─────────────
+fix_*.py
+patch_*.py
+repair_*.py
+apply_*.py
+diag_*.py
+dump_*.py
+retry_failed.py
+check_patch_status.py������_���_v1.0.md
+sampler_config.txt
+
+Тендер_Авто_v1.0.md
