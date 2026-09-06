@@ -1,5 +1,63 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
+# --- SSL-фикс (ТСПУ) inline ---
+import os as _os_ssl
+try:
+    import certifi as _certifi_mod
+    _os_ssl.environ["SSL_CERT_FILE"] = _certifi_mod.where()
+    _os_ssl.environ["REQUESTS_CA_BUNDLE"] = _certifi_mod.where()
+except Exception:
+    pass
+try:
+    import urllib3 as _urllib3_ssl
+    _urllib3_ssl.disable_warnings()
+    import requests as _requests_ssl
+    _me = _requests_ssl.Session.merge_environment_settings
+    def _me_patch(self, url, proxies, stream, verify, cert):
+        st = _me(self, url, proxies, stream, verify, cert)
+        st["verify"] = False
+        return st
+    _requests_ssl.Session.merge_environment_settings = _me_patch
+    _rq = _requests_ssl.Session.request
+    def _rq_patch(self, *a, **k):
+        k["verify"] = False
+        return _rq(self, *a, **k)
+    _requests_ssl.Session.request = _rq_patch
+except Exception:
+    pass
+# --- конец SSL-фикса ---
+try:
+    import sys as _sys_lb
+    _sys_lb.stdout.reconfigure(line_buffering=True)
+    _sys_lb.stderr.reconfigure(line_buffering=True)
+except Exception:
+    pass
+# ── фикс кодировки при запуске через pipe/GUI (Windows cp1251 → UTF-8) ──
+import sys
+import os
+
+# --- ФИКС SSL ДЛЯ PYINSTALLER (FROZEN) ---
+if getattr(sys, 'frozen', False):
+    try:
+        import certifi
+        # Указываем системные переменные, чтобы requests и urllib3 нашли сертификаты
+        os.environ['SSL_CERT_FILE'] = certifi.where()
+        os.environ['REQUESTS_CA_BUNDLE'] = certifi.where()
+        
+        # Принудительно патчим requests, если он уже импортирован
+        import requests
+        requests.defaults.DEFAULT_CA_BUNDLE_PATH = certifi.where()
+    except Exception:
+        pass
+# -----------------------------------------
+import sys as _sys
+for _s in ('stdout', 'stderr'):
+    _st = getattr(_sys, _s)
+    try:
+        if not _st.isatty():
+            _st.reconfigure(encoding='utf-8', errors='replace')
+    except Exception:
+        pass
 """
 sampler.py — модуль «Выборка»: сбор тендеров с ЕИС в Excel формата коллеги
 (лист «Отчет», 8 колонок). Запуск: python sampler.py
@@ -113,6 +171,13 @@ def _v17_ok(title):
     return not any(s in tl for s in STOP_STEMS_V17)
 
 from pathlib import Path
+import sys as _sysf
+if getattr(_sysf, "frozen", False):
+    _FROZEN_BASE = Path(_sysf.executable).resolve().parent
+    if not (_FROZEN_BASE / "config").exists() and (_FROZEN_BASE.parent / "config").exists():
+        _FROZEN_BASE = _FROZEN_BASE.parent
+else:
+    _FROZEN_BASE = Path(__file__).resolve().parent
 from urllib.parse import urlparse, parse_qs, urlencode, urlunparse, unquote
 import requests
 from openpyxl import Workbook
@@ -148,8 +213,8 @@ def _shift_dates(url, today, days_back):
 
 USER_AGENT = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"
 BASE_SEARCH = "https://zakupki.gov.ru/epz/order/extendedsearch/results.html"
-CONFIG_PATH = Path(__file__).parent / "sampler_config.txt"
-OUT_DIR = Path(__file__).parent
+CONFIG_PATH = _FROZEN_BASE / "sampler_config.txt"
+OUT_DIR = _FROZEN_BASE
 
 DEFAULTS = {
     "price_min": 2000000,
