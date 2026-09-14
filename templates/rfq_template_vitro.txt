@@ -2,7 +2,7 @@ Subject: {rfq_subject}
 
 Dear Sales Team,
 
-My name is {sender_name}, Procurement Manager at VITRO LOGISTIC LLC.
+My name is {sender_name}, Procurement Manager at VENTRO VIA GLOBAL LLC.
 
 Tender reference: {tender_number}
 Tender subject: {tender_subject}
@@ -35,4 +35,4 @@ Payment terms: 100% advance payment.
 Best regards,
 Andrey Kozlov
 Tender Analyst
-VITRO LOGISTIC LLC
+VENTRO VIA GLOBAL LLC

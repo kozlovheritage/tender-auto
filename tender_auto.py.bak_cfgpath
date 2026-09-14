@@ -103,8 +103,6 @@ from pathlib import Path
 import sys as _sysf
 if getattr(_sysf, "frozen", False):
     _FROZEN_BASE = Path(_sysf.executable).resolve().parent
-    if _FROZEN_BASE.name.lower() in ("engine", "sampler"):
-        _FROZEN_BASE = _FROZEN_BASE.parent
     if not (_FROZEN_BASE / "config").exists() and (_FROZEN_BASE.parent / "config").exists():
         _FROZEN_BASE = _FROZEN_BASE.parent
 else:
@@ -183,14 +181,14 @@ def _load_secrets():
         "google app password": "GMAIL_APP_PASSWORD",
         "falcon email":       "FALCON_EMAIL",
         "falcon app password": "FALCON_APP_PASSWORD",
-        "ventro via global email":        "VENTRO_VIA_GLOBAL_EMAIL",
-        "ventro via global app password": "VENTRO_VIA_GLOBAL_PASSWORD",
+        "vitro email":        "VITRO_EMAIL",
+        "vitro app password": "VITRO_APP_PASSWORD",
     }
     _ENV_KEYS = [
         "OPENROUTER_API_KEY", "DEEPSEEK_API_KEY", "LANGSEARCH_API_KEY",
         "GMAIL_ADDRESS", "GMAIL_APP_PASSWORD",
         "FALCON_EMAIL", "FALCON_APP_PASSWORD",
-        "VENTRO_VIA_GLOBAL_EMAIL", "VENTRO_VIA_GLOBAL_PASSWORD",
+        "VITRO_EMAIL", "VITRO_APP_PASSWORD",
         "SESSION_SECRET",
     ]
     secrets = {k: v for k in _ENV_KEYS if (v := os.environ.get(k, "").strip())}
@@ -227,7 +225,7 @@ _SECRETS = _load_secrets()
 
 def _find_excel_file(verbose=False):
     """Ищет .xlsx-файл в папке скрипта. Сообщения выводятся только при verbose=True."""
-    folder = _FROZEN_BASE
+    folder = Path(__file__).parent
     files = sorted(folder.glob("*.xlsx"), key=lambda p: p.stat().st_mtime, reverse=True)
     if not files:
         if verbose:
@@ -393,9 +391,7 @@ MASTER_PROMPT = """
 
 **═══════ СТОП-ФАКТОРЫ ═══════**
 
-**ВАЖНО:** Ты применяешь ТОЛЬКО стоп-факторы из списка ниже. Придумывать новые причины для отказа — СТРОГО ЗАПРЕЩЕНО.
-
-**ВАЖНО — «нет Китая» НЕ стоп-фактор.** Поле «Доступность закупки в Китае: Нет» и любые рассуждения о невозможности поставки из Китая НЕ должны приводить к решению «не участвуем»: Китай — лишь один из регионов поиска поставщиков (EMEA, Китай, Турция, Россия). Если документация требует конкретного иностранного производителя или бренда (например ISKAR, YG-1), в том числе с запретом эквивалента, — это НЕ стоп-фактор: рассматриваем поставку оригинального товара через производителя и его официальных дистрибьюторов. Решение «не участвуем» допустимо ТОЛЬКО по стоп-факторам из списка выше. Стоп-факторы применяются ТОЛЬКО при прямом и однозначном упоминании. Расширительное толкование ЗАПРЕЩЕНО (примеры запрещённого: «ниппели» ≠ «насосы»; «электроды для плавки» ≠ «медицинское оборудование»; запчасти для оборудования ≠ само оборудование).
+**ВАЖНО:** Ты применяешь ТОЛЬКО стоп-факторы из списка ниже. Придумывать новые причины для отказа — СТРОГО ЗАПРЕЩЕНО. Стоп-факторы применяются ТОЛЬКО при прямом и однозначном упоминании. Расширительное толкование ЗАПРЕЩЕНО (примеры запрещённого: «ниппели» ≠ «насосы»; «электроды для плавки» ≠ «медицинское оборудование»; запчасти для оборудования ≠ само оборудование).
 
 **1. Сложная закупка: много разнородных позиций от разных производителей.**
    ⛔ ОБЯЗАТЕЛЬНАЯ PRE-ПРОВЕРКА: сначала посчитай количество строк-товаров в таблице «Что нужно поставить» (не считая заголовок). Если строк 10 или менее — стоп-фактор #1 ПОЛНОСТЬЮ ЗАПРЕЩЁН независимо от числа производителей и категорий. Немедленно переходи к стоп-фактору #2. Только при 11 строках и более продолжай проверку ниже.
@@ -543,25 +539,6 @@ MASTER_PROMPT = """
 
 --- Доступность закупки в Китае: [Да / Нет] ---
 """
-
-def _apply_stop_factors(prompt: str) -> str:
-    """Подменяет блок стоп-факторов содержимым config/stop_factors.txt.
-    Файла нет — работают встроенные стоп-факторы промпта (твой набор).
-    Файл есть — набор из файла (набор коллег)."""
-    cfg = _FROZEN_BASE / "config" / "stop_factors.txt"
-    try:
-        block = cfg.read_text(encoding="utf-8").strip()
-    except Exception:
-        return prompt
-    if not block:
-        return prompt
-    ls = prompt.split("\n")
-    a = next((k for k, l in enumerate(ls) if l.strip().startswith("**═══════ СТОП-ФАКТОРЫ")), None)
-    b = next((k for k, l in enumerate(ls) if l.strip().startswith("**ЕСЛИ ОБНАРУЖЕН СТОП-ФАКТОР")), None)
-    if a is None or b is None or b <= a:
-        return prompt
-    ls[a:b] = block.split("\n") + [""]
-    return "\n".join(ls)
 
 # ======================================================================
 # HISTORY
@@ -980,23 +957,7 @@ def _extract_notice_guid(html):
 
 
 
-EIS_MIN_INTERVAL = 1.5   # минимальная пауза между запросами к ЕИС (сек) — крути тут
-EIS_JITTER = 1.0         # случайная добавка к паузе (сек)
-_EIS_LAST_TS = 0.0
-_EIS_403_STREAK = 0
-
-
-def _eis_throttle():
-    import time as _t, random as _r
-    global _EIS_LAST_TS
-    need = EIS_MIN_INTERVAL + _r.uniform(0.0, EIS_JITTER)
-    elapsed = _t.monotonic() - _EIS_LAST_TS
-    if elapsed < need:
-        _t.sleep(need - elapsed)
-    _EIS_LAST_TS = _t.monotonic()
-
-
-def _eis_get_orig(session, url, **kwargs):
+def _eis_get(session, url, **kwargs):
     """GET-запрос к ЕИС с автоматическим отключением SSL-верификации при ошибке (ТСПУ/прокси)."""
     try:
         return session.get(url, **kwargs)
@@ -1006,36 +967,6 @@ def _eis_get_orig(session, url, **kwargs):
             print(f"  ⚠️ SSL-ошибка ЕИС — отключаю верификацию (VPN/ТСПУ), повтор")
             return session.get(url, **kwargs)
         raise
-
-def _eis_get(session, url, **kwargs):
-    """Вежливая обёртка: пауза между запросами и жёсткий стоп при повторном 403/429."""
-    import time as _t
-    global _EIS_403_STREAK
-    _eis_throttle()
-    try:
-        resp = _eis_get_orig(session, url, **kwargs)
-    except Exception as e:
-        if ("403" in str(e)) or ("429" in str(e)):
-            _EIS_403_STREAK += 1
-            if _EIS_403_STREAK >= 2:
-                print("❌ ЕИС: второй 403/429 подряд — IP вероятно заблокирован. Прогон остановлен, чтобы не усугублять бан.")
-                print("   Сделай паузу несколько часов или смени сеть, затем повтори: дедуп пропустит обработанное.")
-                raise SystemExit(77)
-            print(f"⚠ ЕИС 403/429 — пауза 60 сек перед продолжением: {url}")
-            _t.sleep(60)
-        raise
-    status = getattr(resp, 'status_code', None)
-    if status in (403, 429):
-        _EIS_403_STREAK += 1
-        if _EIS_403_STREAK >= 2:
-            print("❌ ЕИС: второй 403/429 подряд — IP вероятно заблокирован. Прогон остановлен.")
-            raise SystemExit(77)
-        print(f"⚠ ЕИС статус {status} — пауза 60 сек: {url}")
-        _t.sleep(60)
-    else:
-        _EIS_403_STREAK = 0
-    return resp
-
 
 def _fetch_guid_via_api(reg_number, notice_type, session):
     _uuid_full = re.compile(
@@ -2563,8 +2494,8 @@ def call_deepseek(prompt):
         headers = {
             "Authorization": f"Bearer {OPENROUTER_API_KEY}",
             "Content-Type": "application/json",
-            "HTTP-Referer": "https://ventroviaglobal.com",
-            "X-Title": "Ventro Via Global Tender Tool",
+            "HTTP-Referer": "https://vitro-logistic.ru",
+            "X-Title": "Vitro Tender Tool",
         }
         payload = {
             "model": "qwen/qwen3-235b-a22b-2507",
@@ -5106,9 +5037,7 @@ EMAIL_RATE_LIMIT_SEC = 3
 
 def _load_sender_config():
     """Читает sender_config.json из папки скрипта. При ошибке — пустой dict."""
-    cfg_path = Path(__file__).parent / "config" / "sender_config.json"
-    if not cfg_path.exists():
-        cfg_path = Path(__file__).parent / "sender_config.json"
+    cfg_path = Path(__file__).parent / "sender_config.json"
     if not cfg_path.exists():
         return {}
     try:
@@ -5123,7 +5052,7 @@ def get_sender_for_region(region_str, sender_config):
     """
     Возвращает sender_id (str) для указанного региона тендера.
     """
-    default = sender_config.get("default_sender", "ventro_via_global")
+    default = sender_config.get("default_sender", "vitro")
     rules = sender_config.get("region_rules", [])
     region_lower = (region_str or "").lower()
     for rule in rules:
@@ -5312,7 +5241,7 @@ def send_rfq_email(to_email, tender_data, from_email=None, from_password=None, t
     tender_price    = str(tender_data.get("tender_price", "—"))
     tender_url      = str(tender_data.get("tender_url", "—"))
     sender_name     = str(tender_data.get("sender_name", "Procurement Team")).strip()
-    sender_company  = str(tender_data.get("sender_company", "Ventro Via Global LLC")).strip()
+    sender_company  = str(tender_data.get("sender_company", "VITRO LOGISTIC LLC")).strip()
     brand_raw       = str(tender_data.get("brand", "") or "").strip()
 
     # Дедлайн в английском формате
@@ -5897,7 +5826,7 @@ def build_queue_from_reports(folder_arg, force=False):
             return
 
     sender_config = _load_sender_config()
-    default_sender = sender_config.get("default_sender", "ventro_via_global")
+    default_sender = sender_config.get("default_sender", "vitro")
 
     tenders = []
     total_docx = 0
@@ -5979,80 +5908,7 @@ def build_queue_from_reports(folder_arg, force=False):
     print("=" * 70)
 
 
-def _refresh_queue_from_docs():
-    """Перед отправкой RFQ ВСЕГДА освежаем очередь из docx-отчётов:
-    - emails перечитываются из отчётов (включая ручные правки поставщиков);
-    - тендеры с удалёнными отчётами убираются из очереди;
-    - обновлённая очередь сохраняется обратно в rfq_queue.json."""
-    import re as _re
-    try:
-        from docx import Document as _Docx
-    except Exception:
-        print("  ⚠️ python-docx недоступен — очередь не освежена")
-        return
-    qpath = DATA_DIR / "rfq_queue.json"
-    if not qpath.exists():
-        return
-    try:
-        q = json.loads(qpath.read_text(encoding="utf-8"))
-    except Exception:
-        return
-    tenders = q.get("tenders") if isinstance(q, dict) else q
-    if not isinstance(tenders, list):
-        return
-    # собственные адреса отправителя — исключаем, чтобы не писать самим себе
-    own = set()
-    for _k, _v in (_SECRETS or {}).items():
-        if _k.upper().endswith("_EMAIL") and "@" in str(_v):
-            own.add(str(_v).strip().lower())
-    try:
-        _sc = _load_sender_config() or {}
-        _pool = _sc.get("senders", _sc) if isinstance(_sc, dict) else {}
-        for _v in _pool.values():
-            if isinstance(_v, dict) and "@" in str(_v.get("email", "")):
-                own.add(str(_v["email"]).strip().lower())
-    except Exception:
-        pass
-    _ere = _re.compile(r"[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}")
-    kept, changed = [], 0
-    for e in tenders:
-        doc = Path(str(e.get("doc_path", "")))
-        if not doc.is_absolute():
-            doc = _FROZEN_BASE / doc
-        if not doc.exists():
-            print(f"  🗑 {e.get('tender_number', '?')}: отчёт удалён — убран из очереди")
-            changed += 1
-            continue
-        try:
-            _d = _Docx(str(doc))
-            _txt = [p_.text for p_ in _d.paragraphs]
-            for _t in _d.tables:
-                for _r in _t.rows:
-                    for _c in _r.cells:
-                        _txt.append(_c.text)
-            emails = []
-            for _m in _ere.finditer("\n".join(_txt)):
-                _em = _m.group(0).lower().strip(".")
-                if _em not in own and _em not in emails:
-                    emails.append(_em)
-        except Exception:
-            emails = list(e.get("emails") or [])
-        if emails != (e.get("emails") or []):
-            changed += 1
-            print(f"  🔁 {e.get('tender_number', '?')}: писем {len(e.get('emails') or [])} → {len(emails)}")
-        e["emails"] = emails
-        kept.append(e)
-    if isinstance(q, dict):
-        q["tenders"] = kept
-    else:
-        q = kept
-    if changed:
-        qpath.write_text(json.dumps(q, ensure_ascii=False, indent=2), encoding="utf-8")
-    print(f"  ✅ Очередь освежена из отчётов: {len(kept)} тендеров")
-
-
 def send_rfq_main():
-    _refresh_queue_from_docs()
     print("=" * 70)
     print("📧 SEND_RFQ — Отправка писем поставщикам")
     print("=" * 70)
@@ -6067,7 +5923,7 @@ def send_rfq_main():
     senders_cfg   = sender_config.get("senders", {})
 
     # --- Предварительная проверка credentials default_sender ---
-    default_sender = sender_config.get("default_sender", "ventro_via_global")
+    default_sender = sender_config.get("default_sender", "vitro")
     cred_warnings  = validate_sender_credentials(default_sender, sender_config, secrets)
     if cred_warnings:
         print()
@@ -6090,13 +5946,7 @@ def send_rfq_main():
     if not queue_data:
         return
 
-    if isinstance(queue_data, list):
-
-
-        queue_data = {'tenders': queue_data}
-
-
-    tenders = queue_data.get('tenders', [])
+    tenders  = queue_data.get("tenders", [])
     run_date = queue_data.get("run_date", "?")
     print(f"  Очередь от:    {run_date}")
     print(f"  Тендеров:      {len(tenders)}")
@@ -6115,9 +5965,7 @@ def send_rfq_main():
         tender_subj = entry.get("tender_subject", "?")
         doc_path    = entry.get("doc_path", "")
         raw_emails  = entry.get("emails", [])
-        sender_id   = entry.get("sender_id", sender_config.get("default_sender", "ventro_via_global"))
-        if sender_id not in (sender_config.get("senders") or {}):
-            sender_id = sender_config.get("default_sender", "ventro_via_global")
+        sender_id   = entry.get("sender_id", sender_config.get("default_sender", "vitro"))
 
         # Старые очереди тоже защищаем от технических и учебных адресов.
         # Для намеренно добавленных нестандартных адресов предусмотрен
@@ -6136,7 +5984,7 @@ def send_rfq_main():
         # Inject sender display info (sender_name, sender_company) from sender_config
         _sender_cfg = sender_config.get("senders", {}).get(sender_id, {})
         entry.setdefault("sender_name",    _sender_cfg.get("sender_name",    "Procurement Team"))
-        entry.setdefault("sender_company", _sender_cfg.get("sender_company", "Ventro Via Global LLC"))
+        entry.setdefault("sender_company", _sender_cfg.get("sender_company", "VITRO LOGISTIC LLC"))
 
         # Проверяем обязательные поля тендера (тема, цена, URL и др.)
         field_problems = validate_tender_fields(entry)
@@ -6177,7 +6025,7 @@ def send_rfq_main():
         # Инжектируем sender_name/company из конфига в entry для шаблона
         sender_cfg = sender_config.get("senders", {}).get(sender_id, {})
         entry.setdefault("sender_name", sender_cfg.get("sender_name", "Procurement Team"))
-        entry.setdefault("sender_company", sender_cfg.get("sender_company", "Ventro Via Global LLC"))
+        entry.setdefault("sender_company", sender_cfg.get("sender_company", "VITRO LOGISTIC LLC"))
 
         brand_note = f" | Бренд: {entry['brand']}" if entry.get("brand") else ""
         items_note = f" | {len(entry.get('items_table') or [])} поз." if entry.get("items_table") else ""
@@ -6477,7 +6325,7 @@ def process_tender(row, idx, total, incomplete_list, rfq_queue, sender_config=No
             print(f"  Подсказки: {combined_hints[:300]}...")
 
         # ── Шаг 5: LLM-вызов ─────────────────────────────────────────────
-        prompt = _apply_stop_factors(MASTER_PROMPT) + f"\n\nСодержание документов:\n{doc_text[:MAX_TEXT_TOTAL]}\n\n{combined_hints}"
+        prompt = MASTER_PROMPT + f"\n\nСодержание документов:\n{doc_text[:MAX_TEXT_TOTAL]}\n\n{combined_hints}"
         response = call_deepseek(prompt)
         if not response:
             raise Exception("Нет ответа от LLM (OpenRouter/DeepSeek)")
@@ -6804,18 +6652,11 @@ def main():
         except Exception as _e:
             print(f"🔧 LangSearch (поиск):     ⚠️ тест не прошёл: {_e}")
     else:
-        print(f"🔧 LangSearch:             {'✅' if (_SECRETS or {}).get('LANGSEARCH_API_KEY') else '— не подключён (опционально, на работу не влияет)'}")
+        print(f"🔧 LangSearch (поиск):     ❌ ключ не задан (LANGSEARCH_API_KEY)")
 
     # 3) LLM-фоллбэк (поставщики через OpenRouter)
     print("🔧 LLM-поставщики: ✅ Готов к работе")
-    try:
-        _sc_b = _load_sender_config() or {}
-        _sid_b = _sc_b.get('default_sender', 'ventro_via_global')
-        _em_b, _pw_b, _tp_b = resolve_sender_credentials(_sid_b, _sc_b, _SECRETS)
-        _mail_ok = bool(_em_b and _pw_b)
-    except Exception:
-        _mail_ok = False
-    print(f"🔧 Email-рассылка (RFQ):   {'✅' if _mail_ok else '❌ нет credentials'}")
+    print(f"🔧 Email-рассылка (RFQ):   {'✅' if EMAIL_ENABLED and GMAIL_ADDRESS else '❌ нет credentials'}")
     print(f"🔧 MX-проверка доменов:    {'✅' if DNS_AVAILABLE else '⚠️ pip install dnspython'}")
     # print("🔧 VPN-прокси: ...") # Скрыто из баннера
     if "--selftest" in sys.argv:
@@ -6843,14 +6684,10 @@ def main():
             and abs(_cp.get("excel_mtime", 0) - _excel_mtime) < 1):
         _already = len(_cp.get("processed", []))
         print(f"\n⚡ Найден незавершённый прогон (обработано {_already} из {_cp.get('total', total)}).")
-        if sys.stdin.isatty():
-            try:
-                _answer = input("   Продолжить? [y/n]: ").strip().lower()
-            except EOFError:
-                _answer = "n"
-        else:
-            _answer = "y"
-            print("   ▶ Запуск из-под GUI — продолжаю автоматически.")
+        try:
+            _answer = input("   Продолжить? [y/n]: ").strip().lower()
+        except EOFError:
+            _answer = "n"
         if _answer == "y":
             _resume_set = set(_cp.get("processed", []))
             print(f"   ▶ Продолжаю с тендера {_already + 1}...")

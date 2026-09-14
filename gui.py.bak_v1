@@ -56,18 +56,6 @@ DEC_STYLE = {
     "Ошибка": (C_RED, "#2a1a1a"),
 }
 
-DEC_MAP = {
-    "participate": "Участвуем",
-    "участвуем": "Участвуем",
-    "clarify": "Требуется уточнение",
-    "требуется уточнение": "Требуется уточнение",
-    "not_participate": "Отказ",
-    "не участвуем": "Отказ",
-    "отказ": "Отказ",
-    "error": "Ошибка",
-    "ошибка": "Ошибка",
-}
-
 
 def _load_theme():
     try:
@@ -156,8 +144,9 @@ class MainWindow(QMainWindow):
         top = QHBoxLayout(); top.setSpacing(8)
         self.btn_sample = QPushButton("⚙ Собрать выборку")
         self.btn_run = QPushButton("▶ Запустить анализ")
-        self.btn_rfq = QPushButton("✉ Отправить RFQ")
+        self.btn_rfq = QPushButton("📧 Отправить RFQ")
         self.btn_run.setObjectName("primary")
+        self.btn_rfq = QPushButton("✉ Отправить RFQ")
         self.btn_open = QPushButton("📁 Отчёты")
         self.btn_stop = QPushButton("■ Стоп")
         self.btn_stop.setObjectName("danger")
@@ -190,6 +179,8 @@ class MainWindow(QMainWindow):
         self.btn_sample.clicked.connect(lambda: self._start(["sampler.py"]))
         self.btn_run.clicked.connect(lambda: self._start(["tender_auto.py"]))
         self.btn_rfq.clicked.connect(self._on_rfq)
+        self.btn_rfq.clicked.connect(
+            lambda: self._start(["tender_auto.py", "--send-rfq"]))
         self.btn_open.clicked.connect(self._open_output)
         self.btn_stop.clicked.connect(self._stop)
         return w
@@ -258,8 +249,7 @@ class MainWindow(QMainWindow):
                 if dec:
                     for val, n in cur.execute(
                             f'SELECT "{dec}", COUNT(*) FROM decisions GROUP BY "{dec}"'):
-                        key = DEC_MAP.get(str(val).strip().lower(), str(val))
-                        counts[key] = counts.get(key, 0) + int(n)
+                        counts[str(val)] = int(n)
             con.close()
         except Exception:
             pass
@@ -286,9 +276,6 @@ class MainWindow(QMainWindow):
             return
         self.base_summary = self._summary()
         self.rfq_seen = 0
-        # Live-счётчик ТЕКУЩЕГО прогона; финальные значения возьмём из БД в _finished
-        self.live_counts = {"Участвуем": 0, "Требуется уточнение": 0,
-                            "Отказ": 0, "Ошибка": 0}
         self.proc = QProcess(self)
         self.proc.setWorkingDirectory(str(BASE))
         self.proc.readyReadStandardOutput.connect(self._read_out)
@@ -329,33 +316,14 @@ class MainWindow(QMainWindow):
         self.proc = None
         new = self._summary()
         diff = {k: max(0, new.get(k, 0) - self.base_summary.get(k, 0)) for k in new}
-        
-        # Показываем итоги ТЕКУЩЕГО прогона (дельта БД) — авторитетный источник
         self._update_badges(diff)
-        
-        # Считаем RFQ-очередь
-        rfq_count = 0
-        rfq_path = BASE / "data" / "rfq_queue.json"
-        if rfq_path.exists():
-            try:
-                import json
-                with open(rfq_path, encoding="utf-8") as f:
-                    q = json.load(f)
-                rfq_count = len(q) if isinstance(q, list) else len(q.get("tenders", []))
-            except Exception:
-                pass
-        self.rfq_seen = rfq_count
-        self._set_badge(self.b_rfq, f"RFQ: {rfq_count}", "Требуется уточнение")
-        
-        total_new = sum(diff.values())
-        total_all = sum(new.values())
-        self._log(f"■ Завершено с кодом {code}. Новых решений: {total_new}. Всего в БД: {total_all}.",
+        total = sum(diff.values())
+        self._log(f"■ Завершено с кодом {code}. Новых решений: {total}.",
                   C_GREEN if code == 0 else C_RED)
         self.status_lbl.setText(
-            f"Готово. Всего: {total_all} · Участвуем {new.get('Участвуем', 0)} · "
-            f"Уточнение {new.get('Требуется уточнение', 0)} · "
-            f"Отказ {new.get('Отказ', 0)} · Ошибок {new.get('Ошибка', 0)} · "
-            f"RFQ: {rfq_count}")
+            f"Готово. Новых: {total} · Участвуем {diff.get('Участвуем', 0)} · "
+            f"Уточнение {diff.get('Требуется уточнение', 0)} · "
+            f"Отказ {diff.get('Отказ', 0)} · Ошибок {diff.get('Ошибка', 0)}")
         self._refresh_history()
 
     def _read_out(self):
@@ -394,17 +362,13 @@ class MainWindow(QMainWindow):
         if not s.strip() or TQDM_RE.search(s):
             return
         u = s.upper()
-        if s.lstrip().startswith("Решение:"):
+        if s.startswith("Решение:") or "РЕШЕНИЕ:" in u:
             if "ТРЕБУЕТСЯ УТОЧНЕНИЕ" in u:
-                color, _key = C_AMBER, "Требуется уточнение"
+                color = C_AMBER
             elif "НЕ УЧАСТВУЕМ" in u:
-                color, _key = C_DIM, "Отказ"
-            elif "ОШИБКА" in u:
-                color, _key = C_RED, "Ошибка"
+                color = C_DIM
             else:
-                color, _key = C_GREEN, "Участвуем"
-            self.live_counts[_key] = self.live_counts.get(_key, 0) + 1
-            self._update_badges(self.live_counts)
+                color = C_GREEN
         elif "❌" in s or "⛔" in s or "ОШИБКА" in u:
             color = C_RED
         elif "✅" in s:
@@ -416,18 +380,11 @@ class MainWindow(QMainWindow):
         self._log(s, color)
 
     def _log(self, text, color=None):
-        sb = self.log.verticalScrollBar()
-        # Проверяем, находится ли скролл внизу (с допуском 20 пикселей)
-        at_bottom = sb.value() >= sb.maximum() - 20
-        
         if color:
             self.log.append(f'<span style="color:{color}">{escape(text)}</span>')
         else:
             self.log.append(escape(text))
-        
-        # Автоскролл только если пользователь сам не прокрутил вверх
-        if at_bottom:
-            sb.setValue(sb.maximum())
+        self.log.ensureCursorVisible()
 
     # ── история ─────────────────────────────────────────
     def _refresh_history(self):

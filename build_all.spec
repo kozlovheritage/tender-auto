@@ -22,7 +22,6 @@ a_eng = Analysis(
     datas=[
         ('config', 'config'),
         ('templates', 'templates'),
-        ('license', 'license'),
         ('brands_extra.txt', '.'),
         ('secrets.txt', '.')
     ],

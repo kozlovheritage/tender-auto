@@ -64,5 +64,7 @@ diag_*.py
 dump_*.py
 retry_failed.py
 check_patch_status.py
-assemble_*.py
-finalize_*.py
+finalize_*.pysettings.toml
+secrets.txt
+sender_config.json
+config/secrets.txt
