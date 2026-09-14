@@ -68,3 +68,16 @@ finalize_*.pysettings.toml
 secrets.txt
 sender_config.json
 config/secrets.txt
+
+# Патчеры и диагностические файлы
+secrets_*.txt
+*.bak_v*
+*.bak_cfg*
+items_ctx.txt
+queue_sample.txt
+stopfactors_full.txt
+show_ctx.py
+test_smtp.py
+sync_rfq_*.py
+safe_rebuild.py
+make_product_v2.py
