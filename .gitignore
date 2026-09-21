@@ -1,0 +1,86 @@
+# ── Секреты / приватное ─────────────────────────────────────────────
+secrets.txt
+sender_config.json
+comands.txt
+*.crt
+*.pem
+
+# ── Лицензия: ключи и генератор (никогда в публичный репо) ──────────
+keygen.py
+license/
+license_client.py
+
+# ── Данные и рантайм ────────────────────────────────────────────────
+data/
+output/
+temp_files/
+
+# ── Сборки и артефакты (PyInstaller / Inno Setup) ───────────────────
+build/
+dist/
+installer_output/
+
+# ── Выгрузки и дампы ────────────────────────────────────────────────
+*.xlsx
+*.zip
+*.html
+*.log
+diag_*_out.txt
+*_dump.txt
+Pasted_Text_*
+
+# ── Бэкапы ──────────────────────────────────────────────────────────
+*.bak
+*.bak_syntax
+*.broken_bak
+
+# ── Python / окружение ──────────────────────────────────────────────
+__pycache__/
+*.pyc
+.pytest_cache/
+.venv/
+venv/
+
+# ── Редакторы ───────────────────────────────────────────────────────
+.vscode/
+.idea/
+
+# ── Локальные конфиги ───────────────────────────────────────────────
+sampler_config.txt
+config/settings.toml
+ui_theme.txt
+
+# ── Внутренние документы (не для публикации) ────────────────────────
+Тендер_Авто_v1.0.md
+Пошаговая_инструкция.md
+УСТАНОВКА_И_ИЗМЕНЕНИЯ.txt
+
+# ── Одноразовые патчеры / диагностики / сборщики ────────────────────
+fix_*.py
+patch_*.py
+repair_*.py
+apply_*.py
+diag_*.py
+dump_*.py
+retry_failed.py
+check_patch_status.py
+finalize_*.pysettings.toml
+secrets.txt
+sender_config.json
+config/secrets.txt
+
+# Патчеры и диагностические файлы
+secrets_*.txt
+*.bak_v*
+*.bak_cfg*
+items_ctx.txt
+queue_sample.txt
+stopfactors_full.txt
+show_ctx.py
+test_smtp.py
+sync_rfq_*.py
+safe_rebuild.py
+make_product_v2.py
+
+# клиентские профили (локально, никогда в git)
+profiles/

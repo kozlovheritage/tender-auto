@@ -1,0 +1,35 @@
+siemens
+allen-bradley
+yokogawa
+pepperl+fuchs
+mitsubishi
+honeywell
+sew-eurodrive
+emerson
+beckhoff
+ifm
+haas automation
+omron
+sick
+caterpillar
+bosch
+abb
+schneider electric
+festo
+smc
+parker
+grundfos
+eaton
+cummins
+danfoss
+balluff
+turck
+banner
+atlas copco
+epiroc
+hydac
+phoenix contact
+weidmuller
+rosemount
+komatsu
+pilz

@@ -1,0 +1,9 @@
+Subject: Supply inquiry: {SUBJECT}
+
+Dear Sir/Madam,
+
+We are {COMPANY}, a supplier of {CATEGORY}.
+We would like to quote for tender {TENDER_NO}.
+
+Best regards,
+{COMPANY}
