@@ -1,86 +1,63 @@
-# ── Секреты / приватное ─────────────────────────────────────────────
+# Credentials / working customer configuration (examples remain tracked)
+.env
+.env.*
+!.env.example
 secrets.txt
 sender_config.json
-comands.txt
-*.crt
-*.pem
-
-# ── Лицензия: ключи и генератор (никогда в публичный репо) ──────────
-keygen.py
+settings.toml
+sampler_config.txt
+!examples/sampler_config.txt
+brands_extra.txt
+config/active_profile.txt
+config/stop_factors.txt
+profiles/*/profile.json
+profiles/*/catalog.json
+profiles/*/gosts.txt
+profiles/*/stop_factors*.txt
+profiles/*/templates/
 license/
-license_client.py
+*.pem
+*.key
+*.p12
+*.pfx
 
-# ── Данные и рантайм ────────────────────────────────────────────────
+# Customer inputs, outputs, runtime state, compiled packages
 data/
+logs/
 output/
 temp_files/
-
-# ── Сборки и артефакты (PyInstaller / Inno Setup) ───────────────────
-build/
 dist/
-installer_output/
-
-# ── Выгрузки и дампы ────────────────────────────────────────────────
-*.xlsx
-*.zip
-*.html
+build/
+package/
+generated-artifacts/
+attached_assets/
+*.db
+*.db-*
+*.sqlite*
 *.log
-diag_*_out.txt
-*_dump.txt
-Pasted_Text_*
-
-# ── Бэкапы ──────────────────────────────────────────────────────────
+*.jsonl
+*.lock
+*.zip
+*.7z
+*.rar
+*.exe
+*.msi
+*.xlsx
+*.xls
+*.docx
+*.pdf
 *.bak
-*.bak_syntax
-*.broken_bak
-
-# ── Python / окружение ──────────────────────────────────────────────
 __pycache__/
-*.pyc
+*.py[cod]
 .pytest_cache/
+.coverage
+htmlcov/
+*.egg-info/
 .venv/
 venv/
-
-# ── Редакторы ───────────────────────────────────────────────────────
-.vscode/
+.pythonlibs/
+node_modules/
+.DS_Store
+Thumbs.db
 .idea/
-
-# ── Локальные конфиги ───────────────────────────────────────────────
-sampler_config.txt
-config/settings.toml
-ui_theme.txt
-
-# ── Внутренние документы (не для публикации) ────────────────────────
-Тендер_Авто_v1.0.md
-Пошаговая_инструкция.md
-УСТАНОВКА_И_ИЗМЕНЕНИЯ.txt
-
-# ── Одноразовые патчеры / диагностики / сборщики ────────────────────
-fix_*.py
-patch_*.py
-repair_*.py
-apply_*.py
-diag_*.py
-dump_*.py
-retry_failed.py
-check_patch_status.py
-finalize_*.pysettings.toml
-secrets.txt
-sender_config.json
-config/secrets.txt
-
-# Патчеры и диагностические файлы
-secrets_*.txt
-*.bak_v*
-*.bak_cfg*
-items_ctx.txt
-queue_sample.txt
-stopfactors_full.txt
-show_ctx.py
-test_smtp.py
-sync_rfq_*.py
-safe_rebuild.py
-make_product_v2.py
-
-# клиентские профили (локально, никогда в git)
-profiles/
+.vscode/

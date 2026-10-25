@@ -102,117 +102,138 @@ def detect_extension(filepath: str) -> str:
     return ''
 
 
-def extract_download_url_from_html(html_text: str, uid: str, page_url: str):
-    from bs4 import BeautifulSoup
-    soup = BeautifulSoup(html_text, 'html.parser')
-    uid_lower = uid.lower()
-    for a in soup.find_all('a', href=True):
-        href = a['href']
-        if uid_lower in href.lower() or any(
-                k in href.lower() for k in ('download', 'filestore', '/file?', '/get?')):
-            if href.startswith('http'):
-                return href
-            if href.startswith('/'):
-                return 'https://zakupki.gov.ru' + href
-    meta = soup.find('meta', attrs={'http-equiv': re.compile(r'refresh', re.I)})
-    if meta:
-        m = re.search(r'url=([^\s;]+)', meta.get('content', ''), re.I)
-        if m:
-            red = m.group(1).strip("'\"")
-            return red if red.startswith('http') else 'https://zakupki.gov.ru' + red
-    form = soup.find('form', action=True)
-    if form:
-        act = form['action']
-        return act if act.startswith('http') else 'https://zakupki.gov.ru' + act
-    return None
+def extract_download_url_from_html(html_text, uid, page_url):
+    from tendercore.eis.protocol import wrapper_link
+    return wrapper_link(html_text, uid, page_url)
 
 
-def download_file(url, uid, link_text, save_dir, session, retries=5,
+def download_file(url, uid, link_text, save_dir, session, retries=3,
                   referer=None, net_err=None, backoff_base=1.0):
-    """Скачивает файл с retry; при 503 — длинные паузы; HTML-редиректы разруливаются."""
-    temp_path = os.path.join(save_dir, f"temp_{uid}.tmp")
-    headers = {"Referer": referer} if referer else {}
-    for attempt in range(retries):
-        try:
-            resp = session.get(url, stream=True, timeout=90, headers=headers)
-            if resp.status_code == 200:
-                with open(temp_path, 'wb') as f:
-                    for chunk in resp.iter_content(8192):
-                        f.write(chunk)
-                if os.path.getsize(temp_path) < 200:
-                    os.remove(temp_path)
-                    log.warning(f"попытка {attempt+1}: файл <200 байт — пропуск")
-                    continue
-                ctype = (resp.headers.get('Content-Type', '') or '')
-                if 'text/html' in ctype or detect_extension(temp_path) == '.html':
-                    html_text = open(temp_path, encoding='utf-8', errors='ignore').read()
-                    os.remove(temp_path)
-                    real_url = extract_download_url_from_html(html_text, uid, url)
-                    target = real_url if real_url and real_url != url else \
-                        re.sub(r'/file\.html', '/file', url)
-                    if target and target != url:
-                        r2 = session.get(target, stream=True, timeout=90, headers=headers)
-                        if r2.status_code == 200 and \
-                                'text/html' not in (r2.headers.get('Content-Type', '') or ''):
-                            with open(temp_path, 'wb') as f:
-                                for chunk in r2.iter_content(8192):
-                                    f.write(chunk)
-                            if os.path.getsize(temp_path) >= 200:
-                                resp = r2
-                            else:
-                                os.remove(temp_path); continue
-                        else:
+    """One six-request budget for wrappers, redirects, retries and 404 fallback."""
+    import contextlib
+    import tempfile
+    from urllib.parse import urlsplit, parse_qs
+    from tendercore.eis.client import EisNetworkError, EisStopError
+    from tendercore.eis.protocol import (
+        file_url, wrapper_link, html_kind, looks_html, validate_payload,
+        diagnostic, document_outcome, mime_type, phase,
+    )
+
+    os.makedirs(save_dir, exist_ok=True)
+    runtime = getattr(session, "runtime", None)
+    if runtime is None:
+        raise EisNetworkError("ЕИС: незащищённая сессия загрузки запрещена")
+    target = file_url(url, url, uid)
+    if not target:
+        diagnostic(url, size=0, category="invalid-document-url")
+        raise EisNetworkError("ЕИС: ссылка не является прямой ссылкой filestore")
+    uid = parse_qs(urlsplit(target).query)["uid"][0]
+    # Never cross between 44-ФЗ and 223-ФЗ on a guessed UID.
+    path = urlsplit(target).path
+    family = "223" if path.startswith("/223/") else ("44" if path.startswith(("/44/", "/44fz/")) else None)
+    candidates = [target] + [
+        item.format(uid=uid) for item in UID_FALLBACK_TPL
+        if family and (item.startswith("https://zakupki.gov.ru/223/")) == (family == "223")
+    ]
+    candidates = list(dict.fromkeys(candidates))
+    attempted = set()
+    sent = 0
+    headers = {"Accept": "application/octet-stream,application/pdf,application/zip,*/*;q=0.8"}
+    if referer:
+        headers["Referer"] = referer
+    for candidate in candidates:
+        if candidate in attempted:
+            continue
+        target = candidate
+        for hop in range(3):
+            if target in attempted or sent >= 6:
+                raise EisNetworkError("ЕИС: лимит ссылок/запросов документа исчерпан")
+            attempted.add(target)
+            response = None
+            temp = None
+            size = 0
+            kind = "download-error"
+            try:
+                phase(f"ЕИС: загрузка документа; запрос {sent + 1} из 6", "info")
+                response = session.get(target, stream=True, timeout=(10, 90), headers=headers,
+                                       retries=min(retries, 3), max_requests=6 - sent)
+                sent += getattr(response, "_eis_requests", 1)
+                actual_url = getattr(response, "_eis_url", target)
+                status = int(response.status_code)
+                if status in (404, 410):
+                    diagnostic(actual_url, response, requests=sent,
+                               attempt=getattr(response, "_eis_attempt", 1), category="not-found")
+                    break
+                if status != 200:
+                    raise EisNetworkError(f"ЕИС HTTP {status}: документ не получен")
+                fd, temp = tempfile.mkstemp(prefix=".eis_", suffix=".part", dir=save_dir)
+                with os.fdopen(fd, "wb") as output:
+                    for chunk in response.iter_content(65536):
+                        if not chunk:
                             continue
-                    else:
+                        size += len(chunk)
+                        if size > 100 * 1024 * 1024:
+                            raise EisNetworkError("ЕИС: файл превысил безопасный лимит 100 МиБ")
+                        output.write(chunk)
+                with open(temp, "rb") as source:
+                    prefix = source.read(8192)
+                if looks_html(prefix, mime_type(response)):
+                    with open(temp, encoding="utf-8-sig", errors="replace") as source:
+                        html = source.read(1024 * 1024)
+                    kind = html_kind(html)
+                    diagnostic(actual_url, response, size=size, requests=sent,
+                               attempt=getattr(response, "_eis_attempt", 1), category=kind)
+                    if kind in ("access-check", "login", "service-unavailable"):
+                        runtime.stop("ЕИС: вместо файла страница проверки доступа или недоступности", 900, 200)
+                    link = wrapper_link(html, uid, actual_url)
+                    if link and hop < 2 and link not in attempted:
+                        target = link
                         continue
-                filename = decode_content_disposition(
-                    resp.headers.get('Content-Disposition')) or link_text or (uid + ".bin")
-                final_name = safe_filename(filename)
-                _, ext = os.path.splitext(final_name)
-                if ext.lower() in ('', '.bin', '.tmp', '.html'):
-                    det = detect_extension(temp_path)
-                    if det and det != '.html':
-                        final_name = os.path.splitext(final_name)[0] + det
-                final_path = os.path.join(save_dir, final_name)
-                base, ext2 = os.path.splitext(final_path)
-                c = 1
-                while os.path.exists(final_path):
-                    final_path = f"{base}_{c}{ext2}"; c += 1
-                os.rename(temp_path, final_path)
-                return final_path
-            elif resp.status_code == 503:
-                wait = 45 * (attempt + 1) * backoff_base
-                log.warning(f"HTTP 503 — ждём {wait:.0f} с")
+                    document_outcome(runtime, html=True)
+                    raise EisNetworkError("ЕИС вернула HTML вместо документа; тендер оставлен на повтор")
+                info = getattr(response, "headers", {}) or {}
+                length = info.get("Content-Length")
+                encoding = str(info.get("Content-Encoding", "")).lower()
+                if length and str(length).isdigit() and encoding in ("", "identity") and size != int(length):
+                    kind = "length-mismatch"
+                    raise EisNetworkError("ЕИС: размер файла не совпал с объявленным; нужен повтор")
+                filename = decode_content_disposition(info.get("Content-Disposition")) or link_text or "document.bin"
+                filename = safe_filename(filename).strip(" .") or "document.bin"
+                kind = "invalid-document"
+                detected = validate_payload(temp, filename)
+                base, extension = os.path.splitext(filename)
+                if extension.lower() in ("", ".bin", ".tmp", ".html") or detected in (".pdf", ".docx", ".xlsx", ".zip"):
+                    filename = (base or "document") + detected
+                destination = os.path.join(save_dir, filename)
+                base, extension = os.path.splitext(destination)
+                index = 1
+                while os.path.exists(destination):
+                    destination = f"{base}_{index}{extension}"
+                    index += 1
+                os.replace(temp, destination)
+                temp = None
+                document_outcome(runtime)
+                phase(f"Документ получен и проверен: {size} байт", "info")
+                return destination
+            except EisStopError:
+                raise
+            except EisNetworkError:
                 if net_err is not None:
                     net_err.append(True)
-                time.sleep(wait)
-                continue
-            else:
-                log.warning(f"HTTP {resp.status_code}")
-        except requests.exceptions.SSLError:
-            if getattr(session, 'verify', True):
-                session.verify = False
-                log.warning("SSL-ошибка — отключаю верификацию (VPN/ТСПУ)")
-            continue
-        except Exception as e:
-            log.warning(f"попытка {attempt+1}: {e}")
-            if attempt < retries - 1:
-                time.sleep(backoff_base * 2 ** attempt)
-    if uid:
-        for tpl in UID_FALLBACK_TPL:
-            try:
-                r = session.get(tpl.format(uid=uid), stream=True, timeout=90)
-                if r.status_code == 200:
-                    with open(temp_path, 'wb') as f:
-                        for chunk in r.iter_content(8192):
-                            f.write(chunk)
-                    if os.path.getsize(temp_path) < 200:
-                        os.remove(temp_path); continue
-                    det = detect_extension(temp_path)
-                    fp = os.path.join(save_dir, safe_filename(uid + (det or ".bin")))
-                    os.rename(temp_path, fp)
-                    return fp
-            except Exception:
-                pass
-            time.sleep(backoff_base * 2)
-    return None
+                if response is not None and kind not in ("html", "not-found", "access-check", "login", "service-unavailable"):
+                    diagnostic(getattr(response, "_eis_url", target), response, size=size, requests=sent,
+                               attempt=getattr(response, "_eis_attempt", 1), category=kind)
+                raise
+            except (requests.exceptions.RequestException, OSError) as exc:
+                if net_err is not None:
+                    net_err.append(True)
+                diagnostic(getattr(response, "_eis_url", target), response, size=size, requests=sent,
+                           attempt=getattr(response, "_eis_attempt", 1), category="broken-stream-or-disk")
+                raise EisNetworkError("ЕИС: запись или поток документа прерваны; нужен повтор") from exc
+            finally:
+                if response is not None:
+                    response.close()
+                if temp is not None:
+                    with contextlib.suppress(FileNotFoundError):
+                        os.unlink(temp)
+    raise EisNetworkError("ЕИС: документ не найден по опубликованной и допустимым запасным ссылкам")

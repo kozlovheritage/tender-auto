@@ -1,4 +1,9 @@
 """Автоизвлечённый мастер-промпт.
+# >>> CEMTORG-PATCH >>>
+import pathlib, json, os
+
+CEMTORG_CATALOG_PATH = pathlib.Path('profiles/cemtorg/catalog.json')
+# <<< CEMTORG-PATCH <<<
 Не править вручную: правки вносить в tender_auto.py и перегенерировать
 скриптом apply_prompt_extract_v1.py.
 """

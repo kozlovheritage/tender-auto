@@ -1,0 +1,11 @@
+# Public example, not a customer's production configuration.
+fz44: да
+fz223: нет
+deadline_days_ahead: 7
+publish_days_back: 6
+auto_shift_dates: да
+max_pages: 5
+records_per_page: 100
+delay_sec: 3
+cemtorg_pages_per_term: 5
+cemtorg_auction_only: да

@@ -19,6 +19,29 @@ from PySide6.QtWidgets import (
     QTabWidget, QTextEdit, QVBoxLayout, QWidget)
 
 import sys as _sysf
+# >>> CEMTORG-PATCH >>>
+import os
+def _active_profile():
+    _p = os.environ.get('PROFILE', '')
+    if not _p:
+        try:
+            _p = (Path(__file__).resolve().parent / 'config' / 'active_profile.txt').read_text(encoding='utf-8').strip()
+        except Exception:
+            _p = 'vitro'
+    return _p.lower()
+def _active_profile_gui():
+    _p = os.environ.get('PROFILE', '')
+    if not _p:
+        try:
+            with open(os.path.join(os.path.dirname(os.path.abspath(__file__)), 'config', 'active_profile.txt'), encoding='utf-8') as _f:
+                _p = _f.read().strip()
+        except Exception:
+            _p = 'vitro'
+    return _p.lower()
+CEMTORG_ACTIVE = _active_profile_gui() == 'cemtorg'
+print(f'[gui] активный профиль: cemtorg' if CEMTORG_ACTIVE else '[gui] активный профиль: vitro')
+HIDE_TABS = ('rfq', 'suppliers', 'рассылка', 'поставщики', 'рфк')
+# <<< CEMTORG-PATCH <<<
 if getattr(_sysf, "frozen", False):
     BASE = Path(_sysf.executable).resolve().parent
 else:
@@ -157,6 +180,19 @@ class MainWindow(QMainWindow):
         self.btn_sample = QPushButton("⚙ Собрать выборку")
         self.btn_run = QPushButton("▶ Запустить анализ")
         self.btn_rfq = QPushButton("✉ Отправить RFQ")
+        # >>> CEMTORG-HIDE >>>
+        if CEMTORG_ACTIVE:
+            for _attr in ('btn_rfq', 'b_rfq', 'badge_rfq', 'lbl_rfq'):
+                _w = getattr(self, _attr, None)
+                if _w is not None:
+                    try:
+                        _w.hide()
+                    except Exception:
+                        pass
+        # <<< CEMTORG-HIDE <<<
+
+        if CEMTORG_ACTIVE:
+            self.btn_rfq.setVisible(False)  # CEMTORG_HIDE_BTN_RFQ
         self.btn_run.setObjectName("primary")
         self.btn_open = QPushButton("📁 Отчёты")
         self.btn_stop = QPushButton("■ Стоп")
@@ -173,6 +209,8 @@ class MainWindow(QMainWindow):
         self.b_rej = self._badge("Отказ: 0")
         self.b_err = self._badge("Ошибка: 0")
         self.b_rfq = self._badge("RFQ: 0")
+        if CEMTORG_ACTIVE:
+            self.b_rfq.setVisible(False)  # CEMTORG_HIDE_BADGE_RFQ
         for b in (self.b_part, self.b_clar, self.b_rej, self.b_err, self.b_rfq):
             badges.addWidget(b)
         badges.addStretch()
@@ -180,12 +218,24 @@ class MainWindow(QMainWindow):
 
         self.status_lbl = QLabel("Готов.")
         self.status_lbl.setObjectName("dim")
+        if CEMTORG_ACTIVE:
+            self.status_lbl.setWordWrap(True)
+            self.status_lbl.setMinimumHeight(24)
+            self.status_lbl.setMaximumHeight(48)
         v.addWidget(self.status_lbl)
-        self.progress = QProgressBar(); self.progress.setRange(0, 100)
-        v.addWidget(self.progress)
+
         self.log = QTextEdit(); self.log.setReadOnly(True)
         self.log.setObjectName("log")
-        v.addWidget(self.log, 1)
+        if CEMTORG_ACTIVE:
+            self.log.hide()
+            v.addWidget(self.log, 2)
+
+        self.progress = QProgressBar(); self.progress.setRange(0, 100)
+        v.addWidget(self.progress)
+        if CEMTORG_ACTIVE:
+            v.addStretch(1)
+        else:
+            v.addWidget(self.log, 1)
 
         self.btn_sample.clicked.connect(lambda: self._start(["sampler.py"]))
         self.btn_run.clicked.connect(lambda: self._start(["tender_auto.py"]))
@@ -196,6 +246,8 @@ class MainWindow(QMainWindow):
 
     def _badge(self, text):
         lb = QLabel(text); lb.setObjectName("badge")
+        if CEMTORG_ACTIVE:
+            lb.setFixedHeight(34)  # CEMTORG_SAMPLER_UI_PATCH
         lb.setStyleSheet(f"background:#20242f; color:{C_DIM};")
         return lb
 
@@ -286,6 +338,32 @@ class MainWindow(QMainWindow):
             return
         self.base_summary = self._summary()
         self.rfq_seen = 0
+        self._active_job = Path(args[0]).stem
+        self._sampler_result = ""
+        self._sampler_error = ""
+        if CEMTORG_ACTIVE:
+            # Keep the selection transcript above the analysis journal.
+            # A new selection starts a new transcript; analysis never erases it.
+            if self._active_job == "sampler":
+                self.log.clear()
+            self.log.show()
+            self.log.document().setMaximumBlockCount(0)
+            if self._active_job == "tender_auto":
+                self._analysis_tender = ""
+                self._analysis_failure = ""
+                self._analysis_failure_shown = False
+                self._analysis_traceback = False
+                self._analysis_paused = False
+                self._analysis_issues = False
+                self._analysis_cancelled = False
+                self._analysis_skipped = 0
+                self._analysis_retries = 0
+                if not hasattr(self, "_analysis_timer"):
+                    self._analysis_timer = QTimer(self)
+                    self._analysis_timer.setInterval(1000)
+                    self._analysis_timer.timeout.connect(self._analysis_tick)
+                self._analysis_stage("Подготовка аналитики")
+                self._analysis_timer.start()
         # Live-счётчик ТЕКУЩЕГО прогона; финальные значения возьмём из БД в _finished
         self.live_counts = {"Участвуем": 0, "Требуется уточнение": 0,
                             "Отказ": 0, "Ошибка": 0}
@@ -293,18 +371,27 @@ class MainWindow(QMainWindow):
         self.proc.setWorkingDirectory(str(BASE))
         self.proc.readyReadStandardOutput.connect(self._read_out)
         self._run_buf = b""
-        self.proc.readyReadStandardOutput.connect(self._buf_out)
         self.proc.finished.connect(self._on_proc_finished)
         self.proc.readyReadStandardError.connect(self._read_err)
         self.proc.finished.connect(self._finished)
+        if CEMTORG_ACTIVE:
+            self.proc.errorOccurred.connect(self._on_proc_error)
         self.btn_stop.setEnabled(True)
         self.btn_run.setEnabled(False); self.btn_sample.setEnabled(False)
-        self.progress.setValue(0)
-        self.status_lbl.setText("Выполняется…")
+        if CEMTORG_ACTIVE and self._active_job == "sampler":
+            self.progress.setRange(0, 0)
+            self.status_lbl.setText("Сбор выборки с ЕИС…")
+        else:
+            self.progress.setRange(0, 100)
+            self.progress.setValue(0)
+            self.status_lbl.setText("Выполняется…")
         self._log(f"▶ python {' '.join(args)}", C_DIM)
         prog, pargs = self._proc_cmd(args)
         _env = QProcessEnvironment.systemEnvironment()
         _env.insert("PYTHONUNBUFFERED", "1")
+        if CEMTORG_ACTIVE:
+            _env.insert("PYTHONIOENCODING", "utf-8")
+            _env.insert("TA_GUI_PROGRESS", "1")
         self.proc.setProcessEnvironment(_env)
         self.proc.start(prog, pargs)
 
@@ -317,11 +404,30 @@ class MainWindow(QMainWindow):
         return sys.executable, ["-u"] + args
 
     def _stop(self):
+        if CEMTORG_ACTIVE and getattr(self, "_active_job", "") == "tender_auto":
+            self._analysis_cancelled = True
         if self.proc and self.proc.state() != QProcess.ProcessState.NotRunning:
             self.proc.terminate()
             if not self.proc.waitForFinished(3000):
                 self.proc.kill()
             self._log("■ Остановлено пользователем.", C_DIM)
+
+    def _on_proc_error(self, error):
+        if error != QProcess.ProcessError.FailedToStart:
+            return
+        proc = self.sender()
+        detail = proc.errorString() if proc else "неизвестная ошибка"
+        if getattr(self, "_active_job", "") == "sampler":
+            self._sampler_error = detail
+        if CEMTORG_ACTIVE and getattr(self, "_active_job", "") == "tender_auto":
+            self._analysis_failure = "Не удалось запустить анализатор: " + detail
+            self._analysis_done(1, QProcess.ExitStatus.NormalExit)
+        self.status_lbl.setText(f"Не удалось запустить процесс: {detail}")
+        self.btn_stop.setEnabled(False)
+        self.btn_run.setEnabled(True)
+        self.btn_sample.setEnabled(True)
+        self.progress.setRange(0, 100)
+        self.progress.setValue(0)
 
     def _finished(self, code, status):
         self.btn_stop.setEnabled(False)
@@ -356,13 +462,55 @@ class MainWindow(QMainWindow):
             f"Уточнение {new.get('Требуется уточнение', 0)} · "
             f"Отказ {new.get('Отказ', 0)} · Ошибок {new.get('Ошибка', 0)} · "
             f"RFQ: {rfq_count}")
+        if code == 77:
+            self.status_lbl.setText("ЕИС: прогон приостановлен. Готовые результаты сохранены; повторите запуск позже.")
+        elif code == 75:
+            self.status_lbl.setText("ЕИС: уже идёт другой запуск. Дождитесь его завершения.")
+
+        if CEMTORG_ACTIVE and getattr(self, "_active_job", "") == "sampler":
+            self.progress.setRange(0, 100)
+            self.progress.setValue(100 if code == 0 else 0)
+            if self._sampler_error and self._sampler_result:
+                self.status_lbl.setText(
+                    "Сбор прерван: " + self._sampler_error[:120]
+                    + " | " + self._sampler_result[:120]
+                )
+            elif self._sampler_error:
+                self.status_lbl.setText(
+                    "Сбор выборки остановлен: " + self._sampler_error[:180]
+                )
+            elif code == 0 and self._sampler_result:
+                self.status_lbl.setText(self._sampler_result)
+            elif code == 77:
+                self.status_lbl.setText(
+                    "ЕИС приостановила сбор; подробность показана выше."
+                )
+            elif code == 75:
+                self.status_lbl.setText(
+                    "Сбор уже запущен в другом окне программы."
+                )
+            elif code != 0:
+                self.status_lbl.setText(
+                    f"Сбор выборки завершился с ошибкой (код {code}); "
+                    "смотрите сообщения выше."
+                )
+            else:
+                self.status_lbl.setText(
+                    "Сбор завершён; итог показан в сообщениях выше."
+                )
+        if CEMTORG_ACTIVE and getattr(self, "_active_job", "") == "tender_auto":
+            self._analysis_done(code, status)
         self._refresh_history()
 
     def _read_out(self):
-        self._feed(bytes(self.proc.readAllStandardOutput()), "out")
+        data = bytes(self.proc.readAllStandardOutput())
+        self._run_buf += data
+        self._feed(data, "out")
 
     def _read_err(self):
-        self._feed(bytes(self.proc.readAllStandardError()), "err")
+        data = bytes(self.proc.readAllStandardError())
+        self._run_buf += data
+        self._feed(data, "err")
 
     def _feed(self, data, stream):
         try:
@@ -377,7 +525,7 @@ class MainWindow(QMainWindow):
         if m:
             self.progress.setValue(int(m.group(1)))
         m = CNT_RE.search(text)
-        if m:
+        if m and not (CEMTORG_ACTIVE and getattr(self, "_active_job", "") == "tender_auto"):
             self.status_lbl.setText(f"Тендер {m.group(1)} из {m.group(2)}")
         buf = (self.buf_out if stream == "out" else self.buf_err) + text
         parts = re.split(r'[\n\r]+', buf)
@@ -389,10 +537,166 @@ class MainWindow(QMainWindow):
         for ln in parts:
             self._handle(ln)
 
+
+    # TA_FRIENDLY_PROGRESS
+    def _analysis_stage(self, text, kind="info"):
+        import time
+        from datetime import datetime
+        if kind == "tender":
+            self._analysis_tender = text
+            text = "Проверка условий закупки"
+        self._analysis_stage_text = text
+        self._analysis_stage_at = time.monotonic()
+        color = {"error": C_RED, "pause": C_AMBER, "warning": C_AMBER,
+                 "result": C_GREEN}.get(kind, C_DIM)
+        title = getattr(self, "_analysis_tender", "")
+        shown = (title + " — " if kind == "tender" and title else "") + text
+        stamp = datetime.now().strftime("%H:%M:%S")
+        self.log.append(
+            f'<span style="color:{color}">{escape(stamp + " · " + shown)}</span>')
+        self._analysis_tick()
+
+    def _analysis_tick(self):
+        import time
+        text = getattr(self, "_analysis_stage_text", "Подготовка")
+        elapsed = max(0, int(time.monotonic() - getattr(
+            self, "_analysis_stage_at", time.monotonic())))
+        title = getattr(self, "_analysis_tender", "")
+        self.status_lbl.setText(
+            (title + " · " if title else "") + text + f" · этап: {elapsed} с")
+
+    def _analysis_line(self, line):
+        line = line.strip()
+        if line.startswith("@@TA_PROGRESS@@"):
+            try:
+                event = json.loads(line[len("@@TA_PROGRESS@@"):])
+                kind = event.get("kind", "info")
+                if kind == "pause":
+                    self._analysis_paused = True
+                if kind in ("error", "warning"):
+                    self._analysis_issues = True
+                if kind == "result":
+                    decision = event.get("decision")
+                    # TA_SEPARATE_EIS_RETRIES
+                    key = {"participate": "Участвуем",
+                           "clarify": "Требуется уточнение",
+                           "not_participate": "Отказ",
+                           "error": "Ошибка", "Ошибка": "Ошибка"}.get(decision)
+                    if key:
+                        self.live_counts[key] = self.live_counts.get(key, 0) + 1
+                        self._update_badges(self.live_counts)
+                    if decision == "network_error":
+                        self._analysis_retries += 1
+                    if decision in ("error", "Ошибка", "network_error"):
+                        kind = "warning"
+                self._analysis_stage(str(event["text"]), kind)
+            except (ValueError, KeyError, TypeError):
+                self._analysis_issues = True
+                self._analysis_stage("Не удалось прочитать сообщение этапа.", "warning")
+            return True
+        if line.startswith("Решение:"):
+            return True  # Counters use the single authoritative result event.
+        if "Ошибка чтения Excel:" in line:
+            self._analysis_failure = (
+                "Не удалось прочитать выгрузку Excel. Закрой Excel и проверь файл.")
+        elif "[ОШИБКА] Excel-файл не найден" in line:
+            self._analysis_failure = "В папке программы не найдена выгрузка Excel."
+        elif "Traceback" in line or re.search(
+                r"\b[\w.]+(?:Error|Exception|Timeout):", line):
+            self._analysis_issues = True
+            if not getattr(self, "_analysis_traceback", False):
+                self._analysis_stage(
+                    "Ошибка выполнения. Технические подробности будут сохранены в logs.",
+                    "error")
+            self._analysis_traceback = True
+        elif "ЕИС:" in line and not any(
+                word in line.lower() for word in ("поставщик", "email", "rfq")):
+            self._analysis_issues = True
+            if any(word in line.lower() for word in (
+                    "приостанов", "прогресс сохранён", "новых запросов нет")):
+                self._analysis_paused = True
+            self._analysis_stage(line[:320], "warning")
+        elif "уже обработан" in line:
+            number = re.search(r"Тендер\s+(\d+)", line)
+            self._analysis_skipped += 1
+            self._analysis_stage(
+                ("№" + number.group(1) + ": " if number else "")
+                + "уже обработан — пропущен.")
+        if (getattr(self, "_analysis_failure", "")
+                and not getattr(self, "_analysis_failure_shown", False)):
+            self._analysis_stage(self._analysis_failure, "error")
+            self._analysis_failure_shown = True
+            return True
+        return False
+
+    def _analysis_done(self, code, status):
+        timer = getattr(self, "_analysis_timer", None)
+        if timer:
+            timer.stop()
+        self.progress.setRange(0, 100)
+        if getattr(self, "_analysis_cancelled", False):
+            message = "Анализ остановлен пользователем; сохранённые результаты оставлены."
+            kind = "warning"
+        elif getattr(self, "_analysis_paused", False) or code in (75, 77):
+            message = "Анализ приостановлен ЕИС. Причина и время ожидания — в журнале выше."
+            kind = "pause"
+        elif (code != 0 or status == QProcess.ExitStatus.CrashExit
+              or getattr(self, "_analysis_failure", "")):
+            message = getattr(self, "_analysis_failure", "") or (
+                f"Анализ завершился с ошибкой (код {code}). Подробности — в logs.")
+            kind = "error"
+        else:
+            count = sum(self.live_counts.values())
+            message = (f"Прогон завершён. Решений: {count}; "
+                       f"ЕИС на повтор: {self._analysis_retries}; "
+                       f"пропущено: {self._analysis_skipped}.")
+            if getattr(self, "_analysis_issues", False):
+                message += " Есть предупреждения — смотри журнал."
+            kind = "warning" if self._analysis_issues else "result"
+        if kind == "error":
+            self.progress.setValue(0)
+        self._analysis_tender = ""
+        self._analysis_stage(message, kind)
+        self.status_lbl.setText(message)
+        self._update_badges(self.live_counts)
+        if (kind == "error" or getattr(self, "_analysis_traceback", False)) and code in (0, -1):
+            from datetime import datetime
+            folder = BASE / "logs"
+            folder.mkdir(exist_ok=True)
+            name = "error_" + datetime.now().strftime("%Y%m%d_%H%M%S") + ".log"
+            (folder / name).write_bytes(bytes(getattr(self, "_run_buf", b"")))
+
     def _handle(self, s):
+        if (CEMTORG_ACTIVE and getattr(self, "_active_job", "") == "sampler"
+                and s.strip().startswith("@@TA_PROGRESS@@")):
+            try:
+                event = json.loads(s.strip()[len("@@TA_PROGRESS@@"):])
+                text = str(event["text"])
+                self._log(text, C_AMBER)
+                self.status_lbl.setText(text)
+            except (ValueError, KeyError, TypeError):
+                self._log("Не удалось прочитать сообщение ЕИС.", C_AMBER)
+            return
+        if (CEMTORG_ACTIVE and getattr(self, "_active_job", "") == "tender_auto"
+                and self._analysis_line(s)):
+            return
         s = s.rstrip()
         if not s.strip() or TQDM_RE.search(s):
             return
+        if CEMTORG_ACTIVE and getattr(self, "_active_job", "") == "sampler":
+            if (s.startswith("📅 Окно дат:") or s.startswith("📄 Страница")
+                    or "новых строк:" in s or s.startswith("🔎 запрос")):
+                self.status_lbl.setText(s.strip())
+            if "ВЫБОРКА:" in s:
+                self._sampler_result = s.strip()
+            elif "Ничего не найдено" in s:
+                self._sampler_result = "Выборка завершена: тендеры не найдены."
+            elif s.startswith("ЕИС: выборка неполная"):
+                self._sampler_error = s.strip()
+                self.status_lbl.setText(s.strip())
+            elif "Traceback" in s or re.search(r"\b[\w.]+(?:Error|Exception|Timeout):", s):
+                self._sampler_error = s.strip()
+                self.status_lbl.setText("Ошибка сборщика: " + s.strip()[:140])
         u = s.upper()
         if s.lstrip().startswith("Решение:"):
             if "ТРЕБУЕТСЯ УТОЧНЕНИЕ" in u:
@@ -416,6 +720,8 @@ class MainWindow(QMainWindow):
         self._log(s, color)
 
     def _log(self, text, color=None):
+        if CEMTORG_ACTIVE and getattr(self, "_active_job", "") != "sampler":
+            return
         sb = self.log.verticalScrollBar()
         # Проверяем, находится ли скролл внизу (с допуском 20 пикселей)
         at_bottom = sb.value() >= sb.maximum() - 20
@@ -502,6 +808,14 @@ class MainWindow(QMainWindow):
         self._run_buf += self.proc.readAllStandardOutput()
 
     def _on_proc_finished(self, code, status):
+        if self.proc is not None:
+            self._read_out()
+            self._read_err()
+        for attr in ("buf_out", "buf_err"):
+            tail = getattr(self, attr, "")
+            setattr(self, attr, "")
+            if tail:
+                self._handle(tail)
         if code not in (0, -1):
             import os, datetime
             d = os.path.join(str(BASE), 'logs')
@@ -580,3 +894,4 @@ def main():
 
 if __name__ == "__main__":
     main()
+# TA_CEMTORG_WEEK_V1

@@ -7,6 +7,7 @@
   4. Иначе NoticeNotFoundError (тендер уйдёт в ошибки, повторится завтра)
 """
 from __future__ import annotations
+from tendercore.eis.client import EisNetworkError
 import re
 from dataclasses import dataclass
 from typing import Optional
@@ -54,6 +55,8 @@ def _guid_from_223_page(client, reg: str) -> Optional[str]:
            f"?regNumber={reg}")
     try:
         resp = client.get(url, retries=2)
+    except EisNetworkError:
+        raise
     except Exception:
         return None
     if resp.status_code != 200:
@@ -67,6 +70,8 @@ def _search_eis(client, reg: str) -> Optional[NoticeInfo]:
            f"?searchString={reg}&morphology=off&sortBy=UPDATE_DATE")
     try:
         resp = client.get(url, retries=2)
+    except EisNetworkError:
+        raise
     except Exception:
         return None
     if resp.status_code != 200:
@@ -102,6 +107,8 @@ def resolve_notice(client, reg: str, row_url: str = "") -> NoticeInfo:
                    f"?regNumber={r}")
             try:
                 resp = client.get(url, retries=2)
+            except EisNetworkError:
+                raise
             except Exception:
                 continue
             if resp.status_code == 200 and (f"regNumber={r}" in resp.text

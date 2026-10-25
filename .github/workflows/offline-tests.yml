@@ -1,0 +1,28 @@
+name: Offline regression checks
+on:
+  push:
+  pull_request:
+permissions:
+  contents: read
+jobs:
+  offline:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - name: Install offline-test dependencies
+        run: >-
+          python -m pip install "reportlab>=4.2,<6" "PyMuPDF>=1.24"
+          requests beautifulsoup4 pandas openpyxl python-docx
+      - name: Check tracked source before creating local examples
+        run: python scripts/check_public_source.py
+      - name: Create synthetic configuration
+        run: python scripts/setup_example.py
+      - name: Check Cemtorg, EIS and public licensing
+        run: |
+          python -m unittest discover -s tests -p test_cemtorg_features.py
+          python -m unittest discover -s tests -p test_eis_documents.py
+          python -m unittest discover -s tests -p test_eis_reliability.py
+          python -m unittest discover -s tests -p test_public_license.py

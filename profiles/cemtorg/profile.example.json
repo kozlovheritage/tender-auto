@@ -1,0 +1,9 @@
+{
+  "profile": "cemtorg",
+  "display_name": "Демонстрационный профиль производителя",
+  "rfq_enabled": false,
+  "suppliers_in_report": false,
+  "china_check": false,
+  "min_delivery_days": 7,
+  "catalog_file": "catalog.json"
+}

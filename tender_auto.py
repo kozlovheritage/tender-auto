@@ -1,3 +1,5 @@
+from tendercore.eis.client import EisClient, EisNetworkError, EisStopError
+from tendercore.eis.runtime import exclusive_eis_run
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 # ── фикс кодировки при запуске через pipe/GUI (Windows cp1251 → UTF-8) ──
@@ -117,6 +119,13 @@ import requests
 import urllib3 as _urllib3_v8
 _urllib3_v8.disable_warnings()  # заодно гасим спам InsecureRequestWarning
 _orig_session_request = requests.Session.request
+# TA_CEMTORG_WEEK_V1
+from tendercore.cemtorg_output import clean_report as _ta_clean_report
+from tendercore.cemtorg_output import current_archive as _ta_current_archive
+from tendercore.report.bundle import save_pdf as _ta_save_pdf
+from tendercore.report.bundle import ensure_pdf as _ta_ensure_pdf
+from tendercore.report.bundle import copy_report_pair as _ta_copy_report_pair
+
 def _patched_session_request(self, method, url, **kw):
     kw.setdefault("timeout", (10, 240))   # 10с подключение, 240с чтение
     return _orig_session_request(self, method, url, **kw)
@@ -228,7 +237,7 @@ _SECRETS = _load_secrets()
 def _find_excel_file(verbose=False):
     """Ищет .xlsx-файл в папке скрипта. Сообщения выводятся только при verbose=True."""
     folder = _FROZEN_BASE
-    files = sorted(folder.glob("*.xlsx"), key=lambda p: p.stat().st_mtime, reverse=True)
+    files = sorted((p for p in folder.glob('*.xlsx') if p.is_file() and not p.name.startswith('~$')), key=lambda p: p.stat().st_mtime, reverse=True)
     if not files:
         if verbose:
             print("[ОШИБКА] .xlsx-файл не найден в папке скрипта.")
@@ -376,6 +385,18 @@ _RUSSIAN_IT_BRANDS_RE = re.compile(
 )
 
 # ========================= МАСТЕР-ПРОМПТ =========================
+# >>> CEMTORG-PATCH >>>
+import pathlib, json, os
+CEMTORG_PROMPT = '''Ты - аналитик тендеров для завода-производителя.
+Правила:
+1. СРОК ПОСТАВКИ < 7 дней -> решение: REJECT, причина: "Срок поставки < 7 дней".
+2. Закупка НЕ соответствует каталогу -> решение: REJECT, причина: "Не наш профиль".
+3. Закупка соответствует каталогу, но данные неполные -> решение: CLARIFY.
+4. Закупка соответствует каталогу и срок >= 7 дней -> решение: ACCEPT.
+Ответ строго в JSON: {"decision": "...", "reason": "..."}'''
+CEMTORG_CATALOG_PATH = pathlib.Path('profiles/cemtorg/catalog.json')
+# <<< CEMTORG-PATCH <<<
+
 MASTER_PROMPT = """
 Ты — опытный аналитик по тендерам. Проанализируй закупку по загруженным документам и прими одно из трёх решений: «участвуем», «требуется уточнение» или «не участвуем».
 
@@ -699,7 +720,7 @@ def append_history_xlsx(new_records):
             rec.get("nmck", ""),
             DECISION_LABELS.get(decision, decision),
             "Да" if rec.get("china_flag") else "Нет",
-            "Да" if rec.get("suppliers_found") else "Нет",
+            "" if CEMTORG_ACTIVE_TA else ("Да" if rec.get("suppliers_found") else "Нет"),
         ]
         for col_idx, value in enumerate(row_data, start=1):
             cell = ws.cell(row=start_row, column=col_idx, value=value)
@@ -731,6 +752,7 @@ def save_run_summary(results, output_dir, path_mapping=None):
         "clarify":        "Требуется уточнение",
         "not_participate": "Отказ",
         "error":          "Ошибка",
+        "network_error":  "Не обработан: ЕИС, повторить",
     }
     FILL_GREEN  = PatternFill("solid", fgColor="C6EFCE")
     FILL_YELLOW = PatternFill("solid", fgColor="FFEB9C")
@@ -745,9 +767,14 @@ def save_run_summary(results, output_dir, path_mapping=None):
     headers = [
         "№", "Номер тендера", "Предмет закупки", "НМЦК (руб.)",
         "Решение", "Доступен в Китае", "Срок подачи заявок",
-        "Поставщики найдены", "Путь к Word-отчёту",
+        "Поставщики найдены", "Путь к PDF-отчёту",
     ]
     col_widths = [5, 22, 55, 18, 25, 18, 22, 22, 50]
+    if CEMTORG_ACTIVE_TA:
+        headers.remove("Поставщики найдены")
+        col_widths.pop(7)
+        headers.remove("Доступен в Китае")
+        col_widths.pop(5)
 
     wb = Workbook()
     ws = wb.active
@@ -770,20 +797,26 @@ def save_run_summary(results, output_dir, path_mapping=None):
         cnt[decision] = cnt.get(decision, 0) + 1
 
         final_doc = pm.get(doc_path, doc_path) if doc_path else None
+        final_pdf = str(Path(final_doc).with_suffix(".pdf")) if final_doc else None
+        report_link = (os.path.relpath(final_pdf, output_dir).replace(os.sep, "/")
+                       if final_pdf and os.path.isfile(final_pdf) else None)
         row_data = [
             row_num, reg, subject_str, nmck_str,
             DECISION_LABELS.get(decision, decision),
             "Да" if china_flag else "Нет",
             deadline,
             "Да" if suppliers_found else "Нет",
-            final_doc or "—",
+            report_link or "—",
         ]
+        if CEMTORG_ACTIVE_TA:
+            row_data.pop(7)
+            row_data.pop(5)
 
         if decision == "participate":
             fill = FILL_GREEN
         elif decision == "clarify":
             fill = FILL_YELLOW
-        elif decision == "error":
+        elif decision in ("error", "network_error"):
             fill = FILL_RED
         else:
             fill = None
@@ -796,6 +829,11 @@ def save_run_summary(results, output_dir, path_mapping=None):
             if fill:
                 cell.fill = fill
 
+        if report_link:
+            link_cell = ws.cell(row=excel_row, column=len(headers))
+            link_cell.hyperlink = report_link
+            link_cell.font = Font(color="007F81", underline="single")
+
     # Итоговая строка
     total_row = len(results) + 2
     summary_text = (
@@ -803,7 +841,7 @@ def save_run_summary(results, output_dir, path_mapping=None):
         f"Участвуем: {cnt.get('participate', 0)}  |  "
         f"Уточнение: {cnt.get('clarify', 0)}  |  "
         f"Отказ: {cnt.get('not_participate', 0)}  |  "
-        f"Ошибок: {cnt.get('error', 0)}"
+        f"Ошибок: {cnt.get('error', 0)}  |  ЕИС, повторить: {cnt.get('network_error', 0)}"
     )
     ws.merge_cells(start_row=total_row, start_column=1, end_row=total_row, end_column=len(headers))
     total_cell = ws.cell(row=total_row, column=1, value=summary_text)
@@ -821,6 +859,7 @@ def save_run_summary(results, output_dir, path_mapping=None):
     save_path = os.path.join(output_dir, filename)
     wb.save(save_path)
     print(f"\n📊 Сводная таблица сохранена: {save_path}")
+    return save_path
 
 # ======================================================================
 # DOWNLOADERS
@@ -980,61 +1019,16 @@ def _extract_notice_guid(html):
 
 
 
-EIS_MIN_INTERVAL = 1.5   # минимальная пауза между запросами к ЕИС (сек) — крути тут
-EIS_JITTER = 1.0         # случайная добавка к паузе (сек)
 _EIS_LAST_TS = 0.0
 _EIS_403_STREAK = 0
 
 
-def _eis_throttle():
-    import time as _t, random as _r
-    global _EIS_LAST_TS
-    need = EIS_MIN_INTERVAL + _r.uniform(0.0, EIS_JITTER)
-    elapsed = _t.monotonic() - _EIS_LAST_TS
-    if elapsed < need:
-        _t.sleep(need - elapsed)
-    _EIS_LAST_TS = _t.monotonic()
 
 
-def _eis_get_orig(session, url, **kwargs):
-    """GET-запрос к ЕИС с автоматическим отключением SSL-верификации при ошибке (ТСПУ/прокси)."""
-    try:
-        return session.get(url, **kwargs)
-    except requests.exceptions.SSLError:
-        if session.verify:
-            session.verify = False
-            print(f"  ⚠️ SSL-ошибка ЕИС — отключаю верификацию (VPN/ТСПУ), повтор")
-            return session.get(url, **kwargs)
-        raise
 
 def _eis_get(session, url, **kwargs):
-    """Вежливая обёртка: пауза между запросами и жёсткий стоп при повторном 403/429."""
-    import time as _t
-    global _EIS_403_STREAK
-    _eis_throttle()
-    try:
-        resp = _eis_get_orig(session, url, **kwargs)
-    except Exception as e:
-        if ("403" in str(e)) or ("429" in str(e)):
-            _EIS_403_STREAK += 1
-            if _EIS_403_STREAK >= 2:
-                print("❌ ЕИС: второй 403/429 подряд — IP вероятно заблокирован. Прогон остановлен, чтобы не усугублять бан.")
-                print("   Сделай паузу несколько часов или смени сеть, затем повтори: дедуп пропустит обработанное.")
-                raise SystemExit(77)
-            print(f"⚠ ЕИС 403/429 — пауза 60 сек перед продолжением: {url}")
-            _t.sleep(60)
-        raise
-    status = getattr(resp, 'status_code', None)
-    if status in (403, 429):
-        _EIS_403_STREAK += 1
-        if _EIS_403_STREAK >= 2:
-            print("❌ ЕИС: второй 403/429 подряд — IP вероятно заблокирован. Прогон остановлен.")
-            raise SystemExit(77)
-        print(f"⚠ ЕИС статус {status} — пауза 60 сек: {url}")
-        _t.sleep(60)
-    else:
-        _EIS_403_STREAK = 0
-    return resp
+    """Production sessions are EisClient; pacing and retries have one owner."""
+    return session.get(url, **kwargs)
 
 
 def _fetch_guid_via_api(reg_number, notice_type, session):
@@ -1061,6 +1055,8 @@ def _fetch_guid_via_api(reg_number, notice_type, session):
                     if val and _uuid_full.match(str(val)):
                         print(f"  Тип извещения: {notice_type} (REST API [{key}])")
                         return str(val)
+            except EisNetworkError:
+                raise
             except Exception:
                 pass
             for key in ('noticeGuid', 'purchaseGuid', 'guid'):
@@ -1072,6 +1068,8 @@ def _fetch_guid_via_api(reg_number, notice_type, session):
                 if m:
                     print(f"  Тип извещения: {notice_type} (REST API text [{key}])")
                     return m.group(1)
+        except EisNetworkError:
+            raise
         except Exception:
             continue
     return None
@@ -1104,6 +1102,8 @@ def _find_guid_via_search(reg_number, session):
         if guid:
             print(f"  Найден через поиск ЕИС, тип: {notice_type}")
         return guid, notice_type
+    except EisNetworkError:
+        raise
     except Exception as e:
         print(f"  Поиск ЕИС: ошибка — {e}")
         return None, None
@@ -1140,6 +1140,8 @@ def fetch_notice_guid(reg_number, session, source_url=None):
                     _notice_type_cache[str(reg_number)] = notice_type
                     _notice_base_path_cache[str(reg_number)] = base_path
                     return "__REG_ONLY__"
+            except EisNetworkError:
+                raise
             except Exception as e:
                 print(f"  URL из выгрузки недоступен: {e}")
     fz = _fz_kind(reg_number)
@@ -1168,6 +1170,8 @@ def fetch_notice_guid(reg_number, session, source_url=None):
             _notice_type_cache[str(reg_number)] = "notice223"
             _notice_base_path_cache[str(reg_number)] = "/epz/order/notice/notice223"
             return "__REG_ONLY__"
+        except EisNetworkError:
+            raise
         except Exception as e:
             print(f"  Ошибка получения GUID: {e}")
             return None
@@ -1186,6 +1190,8 @@ def _fetch_guid_fz44(reg_number, session):
                 _notice_type_cache[str(reg_number)] = notice_type
                 print(f"  Тип извещения 44-ФЗ: {notice_type}")
                 return guid
+        except EisNetworkError:
+            raise
         except Exception:
             continue
 
@@ -1200,6 +1206,8 @@ def _fetch_guid_fz44(reg_number, session):
                 _notice_no_guid_cache[str(reg_number)] = True
                 print(f"  Тип извещения 44-ФЗ: {spa_type} (SPA, GUID не требуется)")
                 return "__REG_ONLY__"
+        except EisNetworkError:
+            raise
         except Exception:
             continue
 
@@ -1214,6 +1222,8 @@ def _fetch_guid_fz44(reg_number, session):
                 _notice_no_guid_cache[str(reg_number)] = True
                 print(f"  Тип извещения 44-ФЗ: {_spa} (SPA, GUID не требуется)")
                 return "__REG_ONLY__"
+        except EisNetworkError:
+            raise
         except Exception:
             continue
 
@@ -1246,6 +1256,8 @@ def _find_fz223_documents_url(reg_number, session):
             )
             print(f"  ✅ 223-ФЗ тип извещения из кэша БД: {notice_type}")
             return docs_url, notice_type
+    except EisNetworkError:
+        raise
     except Exception as e:
         print(f"  ⚠️ Не удалось прочитать notice_type_cache из БД: {e}")
 
@@ -1270,9 +1282,13 @@ def _find_fz223_documents_url(reg_number, session):
                             " (reg_number, notice_type, base_path) VALUES (?, ?, ?)",
                             (key, notice_type, base_path)
                         )
+                except EisNetworkError:
+                    raise
                 except Exception as e:
                     print(f"  ⚠️ Не удалось сохранить notice_type_cache в БД: {e}")
                 return url, notice_type
+        except EisNetworkError:
+            raise
         except Exception:
             continue
     tried = ", ".join(FZ223_NOTICE_TYPES)
@@ -1282,66 +1298,46 @@ def _find_fz223_documents_url(reg_number, session):
 
 
 def get_file_links_from_documents_page(reg_number, notice_guid, session):
+    from tendercore.eis.protocol import document_links, diagnostic, html_kind
     fz = _fz_kind(reg_number)
     key = str(reg_number)
     base_path = _notice_base_path_cache.get(key)
     if notice_guid == "__REG_ONLY__":
         if fz == "223" and (not base_path or base_path == "/epz/order/notice/notice223"):
-            docs_url, found_type = _find_fz223_documents_url(reg_number, session)
+            docs_url, _ = _find_fz223_documents_url(reg_number, session)
             if not docs_url:
-                return []
-            base_path = _notice_base_path_cache.get(key)
+                raise EisNetworkError("ЕИС: не найдена страница документов")
         else:
-            docs_url = (
-                f"https://zakupki.gov.ru{base_path}/documents.html"
-                f"?regNumber={reg_number}"
-            )
-    elif base_path:
-        docs_url = (
-            f"https://zakupki.gov.ru{base_path}/documents.html"
-            f"?purchaseNoticeNumber={reg_number}&noticeGuid={notice_guid}"
-        )
+            if not base_path:
+                raise EisNetworkError("ЕИС: неизвестен путь карточки; адрес не угадываем")
+            docs_url = f"https://zakupki.gov.ru{base_path}/documents.html?regNumber={reg_number}"
     else:
-        notice_type = _notice_type_cache.get(key, f"notice{fz}")
-        docs_url = (
-            f"https://zakupki.gov.ru/epz/order/notice/{notice_type}/documents.html"
-            f"?purchaseNoticeNumber={reg_number}&noticeGuid={notice_guid}"
-        )
+        if not base_path:
+            notice_type = _notice_type_cache.get(key, f"notice{fz}")
+            base_path = f"/epz/order/notice/{notice_type}"
+        docs_url = f"https://zakupki.gov.ru{base_path}/documents.html?purchaseNoticeNumber={reg_number}&noticeGuid={notice_guid}"
+    response = None
     try:
-        resp = _eis_get(session, docs_url, timeout=30)
-        resp.raise_for_status()
-        soup = BeautifulSoup(resp.text, 'html.parser')
-        unique_files = OrderedDict()
-        for a in soup.find_all('a', href=True):
-            href = a['href']
-            link_text = a.get_text().strip().lower()
-            if any(kw in link_text for kw in SKIP_KEYWORDS):
-                print(f"    ⏭️ Пропускаем (стоп-слово): {link_text[:60]}")
-                continue
-            uid_match = re.search(r'[?&]uid=([A-F0-9-]+)', href, re.IGNORECASE)
-            uid = uid_match.group(1) if uid_match else None
-            if uid and uid not in unique_files:
-                if href.startswith('http'):
-                    primary_url = href
-                elif href.startswith('/'):
-                    primary_url = 'https://zakupki.gov.ru' + href
-                else:
-                    notice_type_local = _notice_type_cache.get(str(reg_number), "")
-                    if notice_type_local in ('ea20', 'ea15') or notice_guid == "__REG_ONLY__":
-                        primary_url = f"https://zakupki.gov.ru/44fz/filestore/public/1.0/download/priz/file.html?uid={uid}"
-                    elif fz == "223":
-                        primary_url = f"https://zakupki.gov.ru/223/filestore/public/1.0/download/fz223/file.html?uid={uid}"
-                    else:
-                        primary_url = f"https://zakupki.gov.ru/44/filestore/public/1.0/download/fz44/file.html?uid={uid}"
-                unique_files[uid] = {
-                    'url': primary_url,
-                    'uid': uid,
-                    'text': link_text
-                }
-        return [(info['url'], info['uid'], info['text'], docs_url) for info in unique_files.values()]
-    except Exception as e:
-        print(f"  Ошибка загрузки страницы документов: {e}")
-        return []
+        response = _eis_get(session, docs_url, timeout=30)
+        actual_url = getattr(response, "_eis_url", docs_url)
+        if response.status_code != 200:
+            diagnostic(actual_url, response, category="document-list-http")
+            raise EisNetworkError(f"ЕИС: список документов HTTP {response.status_code}")
+        links = document_links(response.text, actual_url, SKIP_KEYWORDS)
+        if not links:
+            diagnostic(actual_url, response, size=len(response.content),
+                       attempt=getattr(response, "_eis_attempt", 1),
+                       requests=getattr(response, "_eis_requests", 1),
+                       category="document-list-empty-" + html_kind(response.text))
+            raise EisNetworkError("ЕИС: в странице нет прямых ссылок на документы; нужен повтор, а не отказ")
+        return links
+    except EisNetworkError:
+        raise
+    except requests.exceptions.RequestException as exc:
+        raise EisNetworkError("ЕИС: страница документов не получена") from exc
+    finally:
+        if response is not None:
+            response.close()
 
 
 # ========================= СКАЧИВАНИЕ ФАЙЛОВ =========================
@@ -1382,165 +1378,36 @@ def _extract_download_url_from_html(html_text, uid, page_url):
     return None
 
 
-def download_file(url, uid, link_text, save_dir, session, retries=5, referer=None, _net_err=None):
-    """Скачивает файл по URL с retry, HTML-detection и min-size проверкой.
-
-    При HTTP 503 (ЕИС filestore перегружен) делает длинные паузы 45–225 сек вместо
-    стандартных 2–16 сек, чтобы дождаться восстановления сервера.
-    _net_err — изменяемый список; при каждом 503 добавляется True для внешнего контроля.
-    """
-    temp_path = os.path.join(save_dir, f"temp_{uid}.tmp")
-    headers = {}
-    if referer:
-        headers['Referer'] = referer
-    for attempt in range(retries):
-        try:
-            resp = session.get(url, stream=True, timeout=90, headers=headers)
-            if resp.status_code == 200:
-                with open(temp_path, 'wb') as f:
-                    for chunk in resp.iter_content(8192):
-                        f.write(chunk)
-                file_size = os.path.getsize(temp_path)
-                if file_size < 200:
-                    os.remove(temp_path)
-                    print(f"    Попытка {attempt + 1}: HTTP 200, но файл слишком мал ({file_size} байт) — пропуск")
-                    continue
-                content_type = resp.headers.get('Content-Type', '')
-                detected_ext = _detect_extension(temp_path)
-                if 'text/html' in content_type or detected_ext == '.html':
-                    with open(temp_path, 'r', encoding='utf-8', errors='ignore') as f:
-                        html_text = f.read()
-                    os.remove(temp_path)
-                    real_url = _extract_download_url_from_html(html_text, uid, url)
-                    if real_url and real_url != url:
-                        print(f"    Попытка {attempt + 1}: HTML-редирект → {real_url[:80]}")
-                        try:
-                            resp2 = session.get(real_url, stream=True, timeout=90, headers=headers)
-                            if resp2.status_code == 200:
-                                with open(temp_path, 'wb') as f:
-                                    for chunk in resp2.iter_content(8192):
-                                        f.write(chunk)
-                                if os.path.getsize(temp_path) >= 200:
-                                    resp = resp2
-                                else:
-                                    os.remove(temp_path)
-                                    continue
-                            else:
-                                continue
-                        except Exception:
-                            continue
-                    else:
-                        stripped_url = re.sub(r'/file\.html', '/file', url)
-                        if stripped_url != url:
-                            try:
-                                resp3 = session.get(stripped_url, stream=True, timeout=90, headers=headers)
-                                if resp3.status_code == 200 and 'text/html' not in resp3.headers.get('Content-Type', ''):
-                                    with open(temp_path, 'wb') as f:
-                                        for chunk in resp3.iter_content(8192):
-                                            f.write(chunk)
-                                    if os.path.getsize(temp_path) >= 200:
-                                        resp = resp3
-                                    else:
-                                        os.remove(temp_path)
-                                        continue
-                                else:
-                                    continue
-                            except Exception:
-                                continue
-                        else:
-                            continue
-                content_disp = resp.headers.get('Content-Disposition')
-                filename = decode_content_disposition(content_disp)
-                if not filename and link_text:
-                    filename = link_text
-                if not filename:
-                    filename = uid + ".bin"
-                final_filename = safe_filename(filename)
-                _, ext = os.path.splitext(final_filename)
-                if ext.lower() in ('', '.bin', '.tmp', '.html'):
-                    re_detected = _detect_extension(temp_path)
-                    if re_detected and re_detected != '.html':
-                        final_filename = os.path.splitext(final_filename)[0] + re_detected
-                final_path = os.path.join(save_dir, final_filename)
-                counter = 1
-                base, ext = os.path.splitext(final_path)
-                while os.path.exists(final_path):
-                    final_path = f"{base}_{counter}{ext}"
-                    counter += 1
-                os.rename(temp_path, final_path)
-                return final_path
-            else:
-                if resp.status_code == 503:
-                    wait = 45 * (attempt + 1)
-                    print(f"    Попытка {attempt + 1}: HTTP 503 (ЕИС filestore недоступен) — ждём {wait} сек.")
-                    if _net_err is not None:
-                        _net_err.append(True)
-                    time.sleep(wait)
-                    continue  # пропускаем обычный sleep ниже
-                print(f"    Попытка {attempt + 1}: HTTP {resp.status_code}")
-        except requests.exceptions.SSLError:
-            if session.verify:
-                session.verify = False
-                print("    ⚠️ SSL-ошибка — отключаю верификацию (VPN/ТСПУ), повтор")
-                continue
-            time.sleep(2 ** attempt)
-        except Exception as e:
-            print(f"    Попытка {attempt + 1}: {e}")
-        if attempt < retries - 1:
-            time.sleep(2 ** attempt)
-    # Fallback по UID — перебираем все известные хранилища
-    if uid:
-        fallback_urls = [
-            f"https://zakupki.gov.ru/44fz/filestore/public/1.0/download/priz/file.html?uid={uid}",
-            f"https://zakupki.gov.ru/44/filestore/public/1.0/download/fz44/file.html?uid={uid}",
-            f"https://zakupki.gov.ru/223/filestore/public/1.0/download/fz223/file.html?uid={uid}",
-        ]
-        for fallback_url in fallback_urls:
-            for attempt in range(2):
-                try:
-                    resp = session.get(fallback_url, stream=True, timeout=90, headers=headers)
-                    if resp.status_code == 200:
-                        with open(temp_path, 'wb') as f:
-                            for chunk in resp.iter_content(8192):
-                                f.write(chunk)
-                        fb_size = os.path.getsize(temp_path)
-                        if fb_size < 200:
-                            os.remove(temp_path)
-                            continue
-                        detected = _detect_extension(temp_path)
-                        if detected == '.html':
-                            os.remove(temp_path)
-                            continue
-                        fb_filename = uid + (detected if detected else ".bin")
-                        final_path = os.path.join(save_dir, safe_filename(fb_filename))
-                        os.rename(temp_path, final_path)
-                        return final_path
-                except Exception:
-                    pass
-                time.sleep(2)
-    return None
+def download_file(url, uid, link_text, save_dir, session, retries=3, referer=None, _net_err=None):
+    from tendercore.eis.download import download_file as _download
+    return _download(url, uid, link_text, save_dir, session, retries=retries,
+                     referer=referer, net_err=_net_err)
 
 
 def download_tender_documents(reg_number, row, session, tender_dir):
     """
     Скачивает все документы тендера.
     Возвращает (downloaded_paths, partner_card_found, nac_regime_found, network_failed).
-    network_failed=True если 0 файлов скачалось и хотя бы один файл вернул HTTP 503
-    (ЕИС filestore временно недоступен — тендер должен быть повторён, не записан в БД как «не участвуем»).
+    network_failed=True при любом неполном комплекте; LLM-анализ запрещён.
     """
     source_url = str(row.get('Ссылка на источник', '') or '').strip() or None
     notice_guid = fetch_notice_guid(reg_number, session, source_url=source_url)
     if not notice_guid:
-        raise Exception("Не найден noticeGuid")
+        raise EisNetworkError("ЕИС: не найден noticeGuid, документы не получены")
     if notice_guid != "__REG_ONLY__":
         print(f"  GUID: {notice_guid}")
 
     file_items = get_file_links_from_documents_page(reg_number, notice_guid, session)
     print(f"  Найдено релевантных файлов: {len(file_items)}")
 
+    if not file_items:
+        return [], False, False, True
+    incomplete = len(file_items) > MAX_FILES_PER_TENDER
+    if incomplete:
+        print("  ЕИС: файлов больше лимита; комплект будет помечен неполным.")
     downloaded_paths = []
     seen_names = set()
-    _net_err = []  # накапливает True за каждый HTTP 503 при скачивании
+    _net_err = []  # ошибки получения документов
     for url, uid, link_text, docs_referer in file_items[:MAX_FILES_PER_TENDER]:
         saved_path = download_file(url, uid, link_text, tender_dir, session,
                                    referer=docs_referer, _net_err=_net_err)
@@ -1554,8 +1421,8 @@ def download_tender_documents(reg_number, row, session, tender_dir):
                 os.remove(saved_path)
                 print(f"    ⏭️ Пропущен дубликат: {basename}")
         else:
+            incomplete = True
             print(f"    ❌ Не удалось скачать uid={uid}")
-        time.sleep(0.5)
 
     # Проверяем имена файлов на стоп-факторы
     partner_card_found = False
@@ -1573,8 +1440,8 @@ def download_tender_documents(reg_number, row, session, tender_dir):
             nac_regime_found = True
             print(f"  ⚠️ Файл с национальным режимом: '{os.path.basename(fpath)}'")
 
-    # Сетевая ошибка: ни одного файла не скачалось и причина — HTTP 503
-    network_failed = (len(downloaded_paths) == 0 and bool(_net_err))
+    # Неполный комплект — всегда повтор, не окончательное решение.
+    network_failed = incomplete or bool(_net_err) or not downloaded_paths
     return downloaded_paths, partner_card_found, nac_regime_found, network_failed
 
 # ======================================================================
@@ -3129,6 +2996,8 @@ def check_stopfactors_preprocess(excel_subject):
 
 def _log_decision(reg_number, response, extra_note=""):
     """Записывает лог отклонения."""
+    response = _ta_clean_report(response, CEMTORG_ACTIVE_TA)
+    extra_note = _ta_clean_report(extra_note, CEMTORG_ACTIVE_TA)
     logs_dir = os.path.join(OUTPUT_BASE, "logs")
     os.makedirs(logs_dir, exist_ok=True)
     with open(os.path.join(logs_dir, f"{reg_number}_log.txt"), 'w', encoding='utf-8') as f:
@@ -3178,7 +3047,7 @@ def run_post_validations(
         return decision, _RETURN("not_participate")
 
     # ── Пост-проверка 2: Python-валидация срока ────────────────────────────
-    term_days, term_reason = python_validate_term(response)
+    term_days, term_reason = (None, None) if CEMTORG_ACTIVE_TA else python_validate_term(response)
     if term_days is not None:
         print(f"  ⛔ Python-валидация: {term_reason} — меняем на 'не участвуем'")
         _log_decision(reg_number, response, f"[Python-валидация]: {term_reason}")
@@ -3222,14 +3091,14 @@ def run_post_validations(
     china_flag = extract_china_flag(response)
 
     # ── Пост-проверка 5: нац.режим в файле + China=Нет + УЧАСТВУЕМ ────────
-    if nac_regime_file_found and not china_flag and decision == 'participate':
+    if nac_regime_file_found and not china_flag and decision == 'participate' and not CEMTORG_ACTIVE_TA:
         nac_reason = "файл с 'нац.режим' в тендере, China=Нет — вероятное реальное ограничение происхождения (стоп-фактор #3)"
         print(f"  ⚠️ Python-проверка: {nac_reason} → меняем на 'требуется уточнение'")
         _log_decision(reg_number, response, f"[Python-проверка]: {nac_reason}")
         decision = 'clarify'
 
     # ── Пост-проверка 6: ПП-1875 + China=Нет + УЧАСТВУЕМ ─────────────────
-    if decision == 'participate' and not china_flag:
+    if decision == 'participate' and not china_flag and not CEMTORG_ACTIVE_TA:
         if re.search(r'пп.?1875|постановлени\w{0,10}\s*№?\s*1875', response, re.IGNORECASE):
             print(f"  ⚠️ Python-проверка: ПП-1875 + China=Нет → меняем на 'требуется уточнение'")
             decision = 'clarify'
@@ -3286,7 +3155,7 @@ def run_post_validations(
 
     # ── Пост-проверка 10: кириллические модели (стоп #12/#16) ──────────────
     if decision in ('participate', 'clarify'):
-        mined10 = mine_spec_table(response)
+        mined10 = {'cyr_models': []} if CEMTORG_ACTIVE_TA else mine_spec_table(response)
         if mined10['cyr_models']:
             reason10 = (f"российские обозначения моделей "
                         f"({', '.join(mined10['cyr_models'][:3])}) — стоп-фактор #12/#16")
@@ -3296,7 +3165,7 @@ def run_post_validations(
 
     # ── Пост-проверка 11: дженерик-тендер (стоп #18) ───────────────────────
     if decision in ('participate', 'clarify'):
-        mined11 = mine_spec_table(response)
+        mined11 = {'has_model': True, 'brands': ['CEMTORG_NA']} if CEMTORG_ACTIVE_TA else mine_spec_table(response)
         bm = re.search(r'---\s*Производитель / бренд / страна\s*---\s*\n([^\n\-]+)',
                        response, re.IGNORECASE)
         brand_text = bm.group(1).strip() if bm else ""
@@ -3311,7 +3180,7 @@ def run_post_validations(
             return "not_participate", _RETURN("not_participate")
 
     # ── Пост-проверка 12: ГОСТ на товар → уточнение (страховка #13) ────────
-    if decision == 'participate':
+    if decision == 'participate' and not CEMTORG_ACTIVE_TA:
         crit_match = re.search(r'---\s*Критичные требования ТЗ\s*---\s*\n(.*?)(?=\n---|\Z)',
                                response, re.DOTALL | re.IGNORECASE)
         if crit_match:
@@ -3761,7 +3630,7 @@ def _generate_suppliers_llm(subject, brand=None, china_available=False):
       Поставщик 1 — Название (Страна)
       Поставщик 2 — Название (Страна)
       ...
-      E-mail для поставщика 1 — email@domain.com
+      E-mail для поставщика 1 — contact@example.com
       (строки E-mail — только для тех поставщиков, у кого email известен)
     """
     if not OPENROUTER_API_KEY and not DEEPSEEK_API_KEY:
@@ -3785,7 +3654,7 @@ def _generate_suppliers_llm(subject, brand=None, china_available=False):
         f"- несуществующие или вымышленные компании\n"
         f"- выдуманные email-адреса\n\n"
         f"Для каждого поставщика — строго одна строка в формате:\n"
-        f"Название компании | Страна | email@domain.com\n\n"
+        f"Название компании | Страна | contact@example.com\n\n"
         f"Правила:\n"
         f"- Только реальные компании-производители или их официальные дистрибьюторы\n"
         f"- Email — только если ты точно знаешь реальный корпоративный адрес отдела продаж или экспорта этой компании\n"
@@ -4394,7 +4263,7 @@ def _inject_emails_into_suppliers_text(suppliers_text, emails):
 
     for email in sorted(emails):
         try:
-            # «mobatime» из «info@mobatime.com»
+            # «mobatime» из «contact@example.com»
             domain_root = email.split('@')[1].rsplit('.', 1)[0].lower()
         except Exception:
             continue
@@ -4627,7 +4496,7 @@ def _extract_suppliers_from_search_results(subject, brand, china_available, all_
         f"- выдумывать компании которых нет в результатах поиска\n"
         f"- выдумывать email — только те, что реально встречаются в сниппетах выше\n\n"
         f"Формат — строго одна строка на компанию:\n"
-        f"Название компании | Страна | email@domain.com\n\n"
+        f"Название компании | Страна | contact@example.com\n\n"
         f"Если email нет в результатах поиска — третье поле ОСТАВЬ ПУСТЫМ.\n"
         f"Только реальные строки, без нумерации, без заголовков, без пояснений."
     )
@@ -5066,28 +4935,33 @@ def create_tender_report(reg_number, deadline_str, response, suppliers_text, out
     Создаёт Word-отчёт (.docx) для тендера.
     Возвращает путь к сохранённому файлу.
     """
+    response = _ta_clean_report(response, CEMTORG_ACTIVE_TA)
     doc = Document()
     doc.add_heading(f"Аналитический отчёт по закупке № {reg_number}", level=1)
     doc.add_paragraph(f"Дата окончания подачи заявок: {deadline_str}")
     add_structured_report(doc, response)
-    doc.add_heading("Возможные поставщики и контакты", level=2)
-    if suppliers_text:
-        clean_lines = _clean_suppliers_for_docx(suppliers_text)
-        # Отфильтрованный текст не пуст?
-        non_empty = [l for l in clean_lines if l.strip()]
-        if non_empty:
-            for line in clean_lines:
-                if line.strip():
-                    doc.add_paragraph(line)
-                # пустые строки пропускаем — docx и так добавляет отступы
+    if not CEMTORG_ACTIVE_TA:
+        doc.add_heading("Возможные поставщики и контакты", level=2)
+        if suppliers_text:
+            clean_lines = _clean_suppliers_for_docx(suppliers_text)
+            # Отфильтрованный текст не пуст?
+            non_empty = [l for l in clean_lines if l.strip()]
+            if non_empty:
+                for line in clean_lines:
+                    if line.strip():
+                        doc.add_paragraph(line)
+                    # пустые строки пропускаем — docx и так добавляет отступы
+            else:
+                doc.add_paragraph("(Заполняется вручную)")
         else:
             doc.add_paragraph("(Заполняется вручную)")
-    else:
-        doc.add_paragraph("(Заполняется вручную)")
 
     os.makedirs(output_dir, exist_ok=True)
     doc_path = os.path.join(output_dir, f"{reg_number}.docx")
     doc.save(doc_path)
+    _ta_save_pdf(reg_number, deadline_str, response,
+                 "\n".join(_clean_suppliers_for_docx(suppliers_text)) if not CEMTORG_ACTIVE_TA else "",
+                 doc_path, CEMTORG_ACTIVE_TA, _FROZEN_BASE / "config/cemtorg_logistics.json")
     return doc_path
 
 # ======================================================================
@@ -6272,6 +6146,8 @@ def extract_brand_from_subject_and_filenames(excel_subject, downloaded_paths):
     - Всегда: добавляется в combined_hints как подсказка для LLM
     - Если is_reliable=True: применяется как brand_hint после LLM, если LLM не нашёл бренд сам
     """
+    if CEMTORG_ACTIVE_TA:
+        return None, False
     _NONCORPORATE_WORDS = {
         'spec', 'specs', 'technical', 'technic', 'technics',
         'file', 'document', 'doc', 'docs',
@@ -6379,6 +6255,9 @@ def _enrich_brand_in_response(response, brand_hint, doc_text, excel_subject,
     return response, brand_hint, decision
 
 
+# TA_FRIENDLY_PROGRESS
+from tendercore.progress import emit as _ta_progress
+
 def process_tender(row, idx, total, incomplete_list, rfq_queue, sender_config=None):
     """
     Обрабатывает один тендер. Возвращает 9-кортеж:
@@ -6389,6 +6268,7 @@ def process_tender(row, idx, total, incomplete_list, rfq_queue, sender_config=No
         sender_config = {}
 
     reg_number = str(row['Реестровый номер']).strip()
+    _ta_progress(f"Тендер {idx} из {total} · №{reg_number}", "tender")
     deadline_str = parse_date_from_excel(row['Дата окончания подачи заявок'])
     if not deadline_str:
         print("  ⏭️ Пропускаем: в выгрузке нет даты подачи заявок")
@@ -6413,13 +6293,17 @@ def process_tender(row, idx, total, incomplete_list, rfq_queue, sender_config=No
 
     # ── Шаг 1: Быстрые стоп-факторы по названию (до скачивания) ─────────
     if excel_subject and pd.notna(excel_subject):
+        _ta_progress("Проверка названия и стоп-факторов")
         stop_reason = check_stopfactors_preprocess(str(excel_subject))
+        if CEMTORG_ACTIVE_TA and stop_reason and re.search(r'#15|#12|#3|российск', stop_reason, re.IGNORECASE):
+            stop_reason = None
         if stop_reason:
+            _ta_progress("Сработал стоп-фактор: " + str(stop_reason), "warning")
             print(f"  ⛔ Стоп-фактор (предобработка): {stop_reason}")
             return _EARLY("not_participate")
 
     # ── Шаг 2: Сессия и скачивание документов ─────────────────────────────
-    session = requests.Session()
+    session = EisClient(state_dir=DATA_DIR)
     session.verify = False
     session.headers.update({"User-Agent": USER_AGENT})
     if PROXY_URL:
@@ -6428,14 +6312,25 @@ def process_tender(row, idx, total, incomplete_list, rfq_queue, sender_config=No
     os.makedirs(tender_dir, exist_ok=True)
 
     try:
+        _ta_progress("Получение карточки и документов с ЕИС")
         downloaded_paths, partner_card_found, nac_regime_found, network_failed = \
             download_tender_documents(reg_number, row, session, tender_dir)
+
+        _ta_progress(f"Получено файлов: {len(downloaded_paths)}")
+        if network_failed:
+            _ta_progress("Комплект документов ЕИС неполон — окончательное решение не принимается.", "warning")
+            print("  ЕИС: комплект документов неполон. Анализ и окончательное решение отменены.")
+            return _EARLY("network_error")
 
         if partner_card_found:
             return _EARLY("not_participate")
 
         # ── Шаг 3: Извлечение текста ─────────────────────────────────────
+        _ta_progress("Чтение документов и извлечение текста; OCR при необходимости")
         doc_text, critical_errors, success_files, _ = extract_texts_from_paths(downloaded_paths)
+        _ta_progress(f"Текст извлечён: {len(doc_text)} символов")
+        if critical_errors:
+            _ta_progress("Часть документов прочитана с ошибками.", "warning")
 
         if not doc_text.strip():
             print("  ВНИМАНИЕ: не удалось извлечь текст ни из одного документа!")
@@ -6478,10 +6373,12 @@ def process_tender(row, idx, total, incomplete_list, rfq_queue, sender_config=No
 
         # ── Шаг 5: LLM-вызов ─────────────────────────────────────────────
         prompt = _apply_stop_factors(MASTER_PROMPT) + f"\n\nСодержание документов:\n{doc_text[:MAX_TEXT_TOTAL]}\n\n{combined_hints}"
+        _ta_progress("AI-анализ документов — ожидаем ответ модели")
         response = call_deepseek(prompt)
         if not response:
             raise Exception("Нет ответа от LLM (OpenRouter/DeepSeek)")
 
+        _ta_progress("Ответ AI получен. Проверка результата и условий участия")
         response = clean_response_preamble(response)
         response = postprocess_response(response, combined_hints)
         decision = classify_deepseek_response(response)
@@ -6554,7 +6451,7 @@ def process_tender(row, idx, total, incomplete_list, rfq_queue, sender_config=No
             response, brand_hint, doc_text, excel_subject, decision
         )
             # ── Шаг 6.5: майнинг таблицы «Что нужно поставить» (B1) ───────────
-        mined65 = mine_spec_table(response)
+        mined65 = {'brands': []} if CEMTORG_ACTIVE_TA else mine_spec_table(response)
         if mined65['brands'] and (
                 not brand_hint or 'информация отсутствует' in (brand_hint or '').lower()):
             brand_hint = sorted(mined65['brands'])[0]
@@ -6576,12 +6473,16 @@ def process_tender(row, idx, total, incomplete_list, rfq_queue, sender_config=No
             return early_return
 
         china_flag = extract_china_flag(response)
+        if CEMTORG_ACTIVE_TA:
+            china_flag = False
+            response = re.sub(r'---\s*Доступность закупки в Китае:[^\n]*\n?', '', response, flags=re.IGNORECASE)
+            response = re.sub(r'(?ims)^\s*---\s*Возможные\s+поставщики(?:\s+и\s+контакты)?\s*---.*?(?=^\s*---\s|\Z)', '', response).strip()
 
         # ── Шаг 8: Поиск поставщиков ─────────────────────────────────────
         suppliers_text = ""
         # china_flag_for_folder берём из LLM-ответа напрямую, не из результатов поиска
         china_flag_for_folder = bool(china_flag)
-        if decision in ('participate', 'clarify'):
+        if decision in ('participate', 'clarify') and not CEMTORG_ACTIVE_TA:
             subject_clean = str(excel_subject).strip() if excel_subject and pd.notna(excel_subject) else ""
             brand_for_search = (brand_hint.split(',')[0].strip()
                                 if _is_reliable_brand(brand_hint) else None)
@@ -6597,9 +6498,11 @@ def process_tender(row, idx, total, incomplete_list, rfq_queue, sender_config=No
             else:
                 print("  ℹ️ Поставщики не найдены")
 
+
         # ── Шаг 9: Логирование ────────────────────────────────────────────
         logs_dir = os.path.join(OUTPUT_BASE, "logs")
         os.makedirs(logs_dir, exist_ok=True)
+        response = _ta_clean_report(response, CEMTORG_ACTIVE_TA)
         log_content = f"ОТВЕТ:\n{response}"
         if suppliers_text:
             log_content += f"\n\n=== ПОСТАВЩИКИ ===\n{suppliers_text}"
@@ -6611,12 +6514,15 @@ def process_tender(row, idx, total, incomplete_list, rfq_queue, sender_config=No
 
         # ── Шаг 10: Word-отчёт ───────────────────────────────────────────
         reports_dir = os.path.join(OUTPUT_BASE, "temp_reports")
+        _ta_progress("Создание PDF и совместимого DOCX-отчёта")
         doc_path = create_tender_report(
             reg_number, deadline_str, response, suppliers_text, reports_dir
         )
 
+        _ta_progress("PDF и DOCX сохранены")
+
         # ── Шаг 11: RFQ-очередь ──────────────────────────────────────────
-        if decision in ('participate', 'clarify'):
+        if decision in ('participate', 'clarify') and not CEMTORG_ACTIVE_TA:
             raw_emails = extract_emails_from_text(suppliers_text) if suppliers_text else []
             emails, rejected_emails = _select_rfq_emails(raw_emails)
             region_val = str(excel_region).strip() if excel_region and pd.notna(excel_region) else ""
@@ -6653,16 +6559,25 @@ def process_tender(row, idx, total, incomplete_list, rfq_queue, sender_config=No
 
         status_str = 'УЧАСТВУЕМ' if decision == 'participate' else 'ТРЕБУЕТСЯ УТОЧНЕНИЕ'
         src = 'найдены' if suppliers_text else 'нет'
-        print(f"  Решение: {status_str} | Китай: {'Да' if china_flag_for_folder else 'Нет'} | Поставщики: {src}")
+        if CEMTORG_ACTIVE_TA:
+            print(f"  Решение: {status_str}")
+        else:
+            print(f"  Решение: {status_str} | Китай: {'Да' if china_flag_for_folder else 'Нет'} | Поставщики: {src}")
         return (reg_number, deadline_str, doc_path, decision, china_flag_for_folder,
                 missing_for_return, subject_str, nmck_str, bool(suppliers_text))
 
+    except EisStopError:
+        raise
+    except EisNetworkError as e:
+        print(f"  ЕИС: {e}. Тендер оставлен на повтор.")
+        return _EARLY("network_error")
     except Exception as e:
         tb = traceback.format_exc()
         print(f"  ❌ Ошибка при обработке {reg_number}: {e}")
         print(f"  Traceback:\n{tb}")
         return (reg_number, deadline_str, None, "error", False, [], subject_str, nmck_str, False)
     finally:
+        session.close()
         shutil.rmtree(tender_dir, ignore_errors=True)
         time.sleep(DELAY_BETWEEN_TENDERS)
 
@@ -6737,6 +6652,7 @@ except Exception as _e_sw8:
     print(f"⚠️ shadow wiring пропущен: {_e_sw8}")
 
 
+@exclusive_eis_run(lambda: DATA_DIR)
 def main():
     os.makedirs("temp_files", exist_ok=True)
     os.makedirs(OUTPUT_BASE, exist_ok=True)
@@ -6823,12 +6739,12 @@ def main():
 
     if not EXCEL_FILE:
         print("[ОШИБКА] Excel-файл не найден. Положите .xlsx в папку со скриптом.")
-        return
+        raise SystemExit(2)
     try:
         df = pd.read_excel(EXCEL_FILE, sheet_name=SHEET_NAME, dtype={'Реестровый номер': str})
     except Exception as e:
         print(f"Ошибка чтения Excel: {e}")
-        return
+        raise SystemExit(2)
 
     if MAX_TENDERS:
         df = df.head(MAX_TENDERS)
@@ -6838,6 +6754,7 @@ def main():
     _excel_mtime = os.path.getmtime(EXCEL_FILE) if EXCEL_FILE else 0
     _cp = _load_checkpoint()
     _resume_set = set()
+    _retry_pending = set()
     if (_cp
             and _cp.get("excel_file") == EXCEL_FILE
             and abs(_cp.get("excel_mtime", 0) - _excel_mtime) < 1):
@@ -6852,8 +6769,20 @@ def main():
             _answer = "y"
             print("   ▶ Запуск из-под GUI — продолжаю автоматически.")
         if _answer == "y":
-            _resume_set = set(_cp.get("processed", []))
-            print(f"   ▶ Продолжаю с тендера {_already + 1}...")
+            _retry_pending = set(_cp.get("retry_pending", []))
+            # TA_RESUME_DB_FIX
+            _resume_conn = sqlite3.connect((DATA_DIR / "decisions.db").resolve().as_uri() + "?mode=ro", uri=True)
+            try:
+                _resume_set = {
+                    reg for reg in _cp.get("processed", [])
+                    if reg not in _retry_pending and _resume_conn.execute(
+                        "SELECT 1 FROM decisions WHERE tender_number=? AND decision IN "
+                        "('participate','clarify','not_participate','error')", (reg,)
+                    ).fetchone()
+                }
+            finally:
+                _resume_conn.close()
+            print(f"   ▶ Возобновление: подтверждено решений {len(_resume_set)}; незавершённые тендеры будут обработаны повторно.")
         else:
             _delete_checkpoint()
             print("   ▶ Начинаю заново.")
@@ -6862,6 +6791,7 @@ def main():
         "excel_file":  EXCEL_FILE,
         "excel_mtime": _excel_mtime,
         "processed":   _cp_processed,
+        "retry_pending": sorted(_retry_pending),  # TA_RESUME_RETRY_STATE
         "total":       total,
         "started_at":  datetime.datetime.now().strftime("%Y-%m-%d %H:%M"),
     }
@@ -6873,19 +6803,48 @@ def main():
     new_history_records = []
     network_error_list = []   # тендеры, не скачавшиеся из-за HTTP 503 — НЕ пишутся в БД
     _run_completed = False
+    _eis_stopped = None
+    _cp_data["retry_pending"] = sorted(_retry_pending)
     skipped_count = 0
 
     _db_conn = sqlite3.connect(str(DATA_DIR / "decisions.db"))
     _db_conn.row_factory = sqlite3.Row
     _today = datetime.datetime.now().strftime("%Y-%m-%d")
 
+    def _carry_orphan(reg, row, results_list, hist_list):
+        """Подхватывает отчёт из прерванного прогона: docx лежит в temp_reports,
+        решение есть в БД, но в финальную папку/сводку/историю не попало."""
+        doc = os.path.join(OUTPUT_BASE, "temp_reports", f"{reg}.docx")
+        if not os.path.exists(doc):
+            return False
+        drow = _db_conn.execute(
+            "SELECT processed_date, decision, subject, nmck, china_flag, suppliers_found "
+            "FROM decisions WHERE tender_number=?", (reg,)).fetchone()
+        if not drow:
+            return False
+        dl = parse_date_from_excel(row['Дата окончания подачи заявок']) or ""
+        subj = drow["subject"] or ""
+        nmck = drow["nmck"] or ""
+        results_list.append((reg, dl, doc, drow["decision"], bool(drow["china_flag"]),
+                             [], subj, nmck, bool(drow["suppliers_found"])))
+        hist_list.append({"processed_date": drow["processed_date"], "tender_number": reg,
+                          "subject": subj, "nmck": nmck, "decision": drow["decision"],
+                          "china_flag": drow["china_flag"],
+                          "suppliers_found": drow["suppliers_found"]})
+        _ta_ensure_pdf(reg, dl, doc, CEMTORG_ACTIVE_TA,
+                       _FROZEN_BASE / "config/cemtorg_logistics.json")
+        print(f"  📎 Подхвачен отчёт из прошлого запуска: {reg}")
+        return True
+
+
     try:
         for idx, (_, row) in enumerate(tqdm(df.iterrows(), total=total, desc="Тендеры"), start=1):
             _reg = str(row.get('Реестровый номер', '')).strip()
-            if _reg in _resume_set:
+            if _reg in _resume_set and not force_all and _reg not in force_set:
                 print(f"  ⏩ Тендер {_reg} уже обработан в прерванном прогоне — пропуск")
+                _carry_orphan(_reg, row, results, new_history_records)
                 continue
-            if not force_all and _reg not in force_set:
+            if not force_all and _reg not in force_set and _reg not in _retry_pending:
                 _dup = _db_conn.execute(
                     "SELECT processed_date, decision FROM decisions WHERE tender_number=?",
                     (_reg,)
@@ -6894,12 +6853,20 @@ def main():
                     _label = {"participate": "Участвуем", "clarify": "Требуется уточнение",
                               "not_participate": "Отказ", "error": "Ошибка"}.get(_dup["decision"], _dup["decision"])
                     print(f"  ⏭ Тендер {_reg} уже обработан ({_dup['processed_date']}, решение: {_label}) — пропуск")
+                    _carry_orphan(_reg, row, results, new_history_records)
                     skipped_count += 1
                     continue
             elif _reg in force_set:
                 print(f"  🔁 Тендер {_reg} — принудительная переобработка (--force)")
 
             res = process_tender(row, idx, total, incomplete_tenders_global, rfq_queue, sender_config)
+            _progress_labels = {
+                "participate": "Участвуем", "clarify": "Требуется уточнение",
+                "not_participate": "Не участвуем", "network_error": "Документы не получены — нужен повтор",
+                "error": "Ошибка обработки", "Ошибка": "Ошибка обработки",
+            }
+            _ta_progress(f"№{res[0]}: " + _progress_labels.get(res[3], str(res[3])),
+                         "result", res[3])
             results.append(res)
 
             _reg2, _deadline, _doc, _decision, _china, _missing, _subj, _nmck, _sup = res
@@ -6907,7 +6874,8 @@ def main():
             # Сетевая ошибка ЕИС (HTTP 503) — не пишем в БД, тендер повторится при следующем запуске
             if _decision == "network_error":
                 network_error_list.append(_reg2)
-                _cp_processed.append(_reg2)
+                _retry_pending.add(_reg2)
+                _cp_data["retry_pending"] = sorted(_retry_pending)
                 _cp_data["processed"] = _cp_processed
                 _save_checkpoint(_cp_data)
                 continue
@@ -6930,11 +6898,24 @@ def main():
                 "suppliers_found": _sup,
             })
 
+            _retry_pending.discard(_reg2)
+            _cp_data["retry_pending"] = sorted(_retry_pending)
             _cp_processed.append(_reg2)
             _cp_data["processed"] = _cp_processed
             _save_checkpoint(_cp_data)
 
-        _run_completed = True
+        _run_completed = not network_error_list
+    except EisStopError as e:
+        _eis_stopped = e
+        _retry_pending.add(_reg)
+        _cp_data["retry_pending"] = sorted(_retry_pending)
+        _cp_data["processed"] = _cp_processed
+        _save_checkpoint(_cp_data)
+        network_error_list.append(_reg)
+        results.append((_reg, parse_date_from_excel(row.get("Дата окончания подачи заявок")) or "",
+                        None, "network_error", False, [], str(row.get("Название", "") or "—"),
+                        str(row.get("Начальная цена", "") or "—"), False))
+        print(f"ЕИС: прогон приостановлен — {e}")
     except KeyboardInterrupt:
         print("\n⚠️ Прервано пользователем. Чекпоинт сохранён.")
     finally:
@@ -6951,7 +6932,7 @@ def main():
             errors.append(reg)
         elif doc_path:
             date_groups[deadline].append(doc_path)
-            if china_flag:
+            if china_flag and not CEMTORG_ACTIVE_TA:
                 china_date_groups[deadline].append(doc_path)
             if status in ('participate', 'clarify'):
                 participate_clarify_count += 1
@@ -6976,21 +6957,21 @@ def main():
             folder = os.path.join(final_dir, deadline.replace('.', '_'))
             os.makedirs(folder, exist_ok=True)
             for src in paths:
-                shutil.copy(src, folder)
+                _ta_copy_report_pair(src, folder)
                 path_mapping[src] = os.path.join(folder, os.path.basename(src))
-        china_parent = os.path.join(final_dir, "Доступные к закупке в Китае")
-        os.makedirs(china_parent, exist_ok=True)
-        for deadline, paths in china_date_groups.items():
-            folder = os.path.join(china_parent, deadline.replace('.', '_'))
-            os.makedirs(folder, exist_ok=True)
-            for src in paths:
-                shutil.copy(src, folder)
+        if not CEMTORG_ACTIVE_TA:
+            china_parent = os.path.join(final_dir, "Доступные к закупке в Китае")
+            os.makedirs(china_parent, exist_ok=True)
+            for deadline, paths in china_date_groups.items():
+                folder = os.path.join(china_parent, deadline.replace('.', '_'))
+                os.makedirs(folder, exist_ok=True)
+                for src in paths:
+                    _ta_copy_report_pair(src, folder)
         for entry in rfq_queue:
             old_path = entry.get("doc_path", "")
             if old_path in path_mapping:
                 entry["doc_path"] = path_mapping[old_path]
-        archive_path = shutil.make_archive(final_dir, 'zip', final_dir)
-        print(f"\n✅ Архив создан: {archive_path}")
+
 
     if errors:
         print("\n❌ Тендеры с ошибками:")
@@ -7000,7 +6981,7 @@ def main():
         print("\n✅ Все тендеры обработаны без критических ошибок.")
 
     if network_error_list:
-        print(f"\n⚠️  Тендеры с ошибкой сети ЕИС (HTTP 503) — НЕ записаны в БД, повторятся при следующем запуске:")
+        print(f"\n⚠️  Тендеры с неполученными документами ЕИС — НЕ записаны в БД, повторятся при следующем запуске:")
         for n in network_error_list:
             print(f"  {n}")
         nums_str = ",".join(network_error_list)
@@ -7009,7 +6990,13 @@ def main():
 
     if results:
         summary_dir = final_dir if (date_groups or china_date_groups) else OUTPUT_BASE
-        save_run_summary(results, summary_dir, path_mapping)
+        summary_path = save_run_summary(results, summary_dir, path_mapping)
+        if date_groups or china_date_groups:
+            _ta_progress("Сборка итогового архива PDF, DOCX и сводки")
+            archive_path = (_ta_current_archive(final_dir, date_groups, summary_path)
+                            if CEMTORG_ACTIVE_TA else
+                            shutil.make_archive(final_dir, 'zip', final_dir))
+            print(f"\n✅ Архив создан: {archive_path}")
 
     append_history_xlsx(new_history_records)
 
@@ -7034,8 +7021,39 @@ def main():
 
     if skipped_count:
         print(f"📋 Пропущено дубликатов: {skipped_count}")
-    print("Готово.")
+    if _eis_stopped is not None:
+        raise _eis_stopped
+    if network_error_list:
+        print("Прогон завершён не полностью: есть тендеры для повтора.")
+    else:
+        print("Готово.")
 
+
+
+# >>> CEMTORG-PATCH LOGIC >>>
+def _active_profile_ta():
+    _p = os.environ.get('PROFILE', '')
+    if not _p:
+        try:
+            with open(os.path.join(os.path.dirname(os.path.abspath(__file__)), 'config', 'active_profile.txt'), encoding='utf-8') as _f:
+                _p = _f.read().strip()
+        except Exception:
+            _p = 'vitro'
+    return _p.lower()
+CEMTORG_ACTIVE_TA = _active_profile_ta() == 'cemtorg'
+if CEMTORG_ACTIVE_TA:
+    try:
+        _sf = pathlib.Path('config/stop_factors.txt').read_text(encoding='utf-8')
+        _head, _sep, _tail = MASTER_PROMPT.partition('**═══════ СТОП-ФАКТОРЫ ═══════**')
+        if _sep:
+            _rest = _tail.split('═══════════════════════════════════════════════════', 1)
+            if len(_rest) == 2:
+                MASTER_PROMPT = (_head + '**═══════ СТОП-ФАКТОРЫ (профиль CEMTORG) ═══════**\n'
+                                 + _sf + '\n═══════════════════════════════════════════════════' + _rest[1])
+        print("⚙️ [CEMTORG] Активен профиль завода-производителя: стоп-факторы из config/stop_factors.txt")
+    except Exception as e:
+        print(f"⚠️ [CEMTORG] Ошибка подмены стоп-факторов: {e}")
+# <<< CEMTORG-PATCH LOGIC <<<
 
 if __name__ == "__main__":
     if os.environ.get("USE_TENDERCORE") == "1":

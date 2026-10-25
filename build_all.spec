@@ -11,7 +11,8 @@ hidden_imports = [
     'win32com.client', 'dns', 'tqdm', 'bs4', 'fitz', 'pytesseract',
     'striprtf', 'patoolib', 'pptx', 'docx', 'pandas', 'openpyxl',
     'lxml', 'lxml.etree', 'lxml.objectify', 'pdfminer', 'pypdfium2',
-    'requests', 'urllib3', 'certifi'
+    'requests', 'urllib3', 'certifi', 'reportlab', 'reportlab.pdfbase.ttfonts',
+    'reportlab.platypus', 'reportlab.pdfbase._fontdata_enc_winansi'
 ]
 
 # ========== 1. ENGINE ==========
@@ -22,6 +23,8 @@ a_eng = Analysis(
     datas=[
         ('config', 'config'),
         ('templates', 'templates'),
+        ('tendercore/report/fonts', 'tendercore/report/fonts'),
+        ('tendercore/report/assets', 'tendercore/report/assets'),
         ('brands_extra.txt', '.'),
         ('secrets.txt', '.')
     ],

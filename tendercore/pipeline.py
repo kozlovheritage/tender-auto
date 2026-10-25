@@ -5,6 +5,7 @@
 Headless: только logging, возвращает TenderResult.
 """
 from __future__ import annotations
+from tendercore.eis.client import EisClient, EisNetworkError, EisStopError
 import datetime
 import os
 import re
@@ -17,6 +18,11 @@ from tendercore.llm import (classify_response, clean_response_preamble,
                             extract_china_flag, postprocess_response)
 from tendercore.extract import hints as ex_hints
 from tendercore.extract.pipeline import extract_texts_from_paths
+# >>> CEMTORG-PATCH >>>
+import pathlib, json, os
+CEMTORG_ACTIVE = os.environ.get('PROFILE', 'cemtorg').lower() == 'cemtorg'
+CEMTORG_SKIP_RFK = os.environ.get('CEMTORG_SKIP_RFK', '1') == '1'
+# <<< CEMTORG-PATCH <<<
 
 log = get_logger("pipeline")
 
@@ -36,12 +42,15 @@ def default_deps():
     import requests
 
     def download(reg, row):
-        session = requests.Session()
+        session = EisClient(state_dir=m.DATA_DIR)
         session.verify = False
         session.headers.update({"User-Agent": m.USER_AGENT})
         tender_dir = os.path.join("temp_files", reg)
         os.makedirs(tender_dir, exist_ok=True)
-        return m.download_tender_documents(reg, row, session, tender_dir)
+        try:
+            return m.download_tender_documents(reg, row, session, tender_dir)
+        finally:
+            session.close()
 
     return Deps(
         download=download,
@@ -119,7 +128,14 @@ def process_tender(row, deps: Deps) -> TenderResult:
         log.info(f"⛔ precheck: {precheck.check_title(subject)}")
         return TenderResult(decision=Decision.NOT_PARTICIPATE, **base)
 
-    paths, partner_card, nac_regime, network_failed = deps.download(reg, row)
+    try:
+        paths, partner_card, nac_regime, network_failed = deps.download(reg, row)
+    except EisStopError:
+        raise
+    except EisNetworkError:
+        return TenderResult(decision=Decision.NETWORK_ERROR, **base)
+    if network_failed:
+        return TenderResult(decision=Decision.NETWORK_ERROR, **base)
     if partner_card:
         return TenderResult(decision=Decision.NOT_PARTICIPATE, **base)
 
