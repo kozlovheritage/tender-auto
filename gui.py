@@ -274,6 +274,16 @@ class MainWindow(QMainWindow):
             {"dark": 0, "light": 1, "auto": 2}.get(_load_theme(), 0))
         self.theme_combo.currentIndexChanged.connect(self._on_theme)
         v.addWidget(self.theme_combo)
+
+        v.addWidget(QLabel("Активный профиль:"))
+        self.profile_combo = QComboBox()
+        self.profile_combo.addItems(["Витро", "Цемторг"])
+        _cur = _active_profile_gui()
+        self.profile_combo.setCurrentIndex(1 if _cur == "cemtorg" else 0)
+        self.profile_combo.currentIndexChanged.connect(self._on_profile_changed)
+        v.addWidget(self.profile_combo)
+        v.addWidget(QLabel("Изменение вступит в силу после перезапуска программы."))
+
         v.addWidget(QLabel(f"Папка проекта: {BASE}"))
         v.addWidget(QLabel(f"Отчёты: {BASE / 'output'}"))
         v.addWidget(QLabel("Ключи API: secrets.txt (GUI их не хранит)."))
@@ -285,6 +295,19 @@ class MainWindow(QMainWindow):
         t = {0: "dark", 1: "light", 2: "auto"}[i]
         _save_theme(t)
         _apply_theme(t)
+
+    def _on_profile_changed(self, i):
+        name = {0: "vitro", 1: "cemtorg"}[i]
+        try:
+            p = Path(__file__).resolve().parent / "config" / "active_profile.txt"
+            p.parent.mkdir(parents=True, exist_ok=True)
+            p.write_text(name, encoding="utf-8")
+            QMessageBox.information(
+                self, "Профиль",
+                f"Профиль изменён на '{name}'.\n"
+                "Перезапустите программу, чтобы изменения вступили в силу.")
+        except Exception as e:
+            QMessageBox.warning(self, "Профиль", f"Не удалось сохранить профиль: {e}")
 
     def _open_output(self):
         out = BASE / "output"
